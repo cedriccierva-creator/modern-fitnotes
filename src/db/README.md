@@ -1,3 +1,7 @@
-Dexie + IndexedDB layer lands with the persistence phase. The schema, the
-queries and the import/export helpers all live here, mirroring KainLog's
-`src/db` split (`db.ts`, `queries.ts`, `backup.ts`).
+IndexedDB layer.
+
+- `db.ts` — the Dexie schema only. Version 1 is frozen once shipped; later
+  changes are added as `this.version(2).stores({...}).upgrade(...)`, never as
+  edits to an existing version.
+- Query helpers, cascades and JSON import/export arrive in later phases. They
+  belong here, not in screens.

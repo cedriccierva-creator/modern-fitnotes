@@ -20,5 +20,6 @@ stops for review. `src/db/README.md` tracks where the persistence layer lands.
 
 ## Current state
 
-Phase 1 — project foundation only: toolchain, folder structure, theme and app
-shell. No calendar, logging, routines or database yet.
+Phase 2 — database foundation: Dexie schema and TypeScript models for workout
+days, exercises, session exercises, sets and settings. No UI, calendar, routines
+or import/export yet.
