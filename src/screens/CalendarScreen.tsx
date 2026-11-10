@@ -17,44 +17,49 @@ import type { PlannedDay, WorkoutCategory } from '../types';
  * is local state; everything persistent lives in the plannedDays table, which
  * is re-read after each write.
  */
-export default function CalendarScreen() {
+export default function CalendarScreen({
+  selected,
+  onSelect,
+  onOpenDay,
+}: {
+  selected: string;
+  onSelect: (date: string) => void;
+  onOpenDay: (date: string) => void;
+}) {
   const today = todayKey();
-  const [selected, setSelected] = useState(today);
-  const [year, setYear] = useState(Number(today.slice(0, 4)));
-  const [month, setMonth] = useState(Number(today.slice(5, 7)));
+  const [cursor, setCursor] = useState(() => ({
+    year: Number(selected.slice(0, 4)),
+    month: Number(selected.slice(5, 7)),
+  }));
   const [planned, setPlanned] = useState<readonly PlannedDay[]>([]);
   const [logged, setLogged] = useState<ReadonlySet<string>>(new Set());
 
+  const visibleDates = useMemo(() => monthGrid(cursor.year, cursor.month), [cursor]);
+
   function refresh(): void {
     void loadPlannedDays().then(setPlanned);
-    void loadLoggedDates(monthGrid(year, month)).then(setLogged);
+    void loadLoggedDates(visibleDates).then(setLogged);
   }
 
-  useEffect(refresh, [year, month]);
+  useEffect(refresh, [visibleDates]);
 
   const plannedByDate = useMemo(() => new Map(planned.map((row) => [row.date, row])), [planned]);
 
   const visiblePlanned = useMemo(() => {
     const map = new Map<string, PlannedDay>();
     for (const row of planned) {
-      if (Number(row.date.slice(5, 7)) === month && Number(row.date.slice(0, 4)) === year) {
+      if (row.date.startsWith(`${cursor.year}-${`${cursor.month}`.padStart(2, '0')}`)) {
         map.set(row.date, row);
       }
     }
     return map;
-  }, [planned, year, month]);
+  }, [planned, cursor]);
 
   function navigate(delta: number): void {
-    const next = month + delta;
-    if (next < 1) {
-      setMonth(12);
-      setYear((current) => current - 1);
-    } else if (next > 12) {
-      setMonth(1);
-      setYear((current) => current + 1);
-    } else {
-      setMonth(next);
-    }
+    const next = cursor.month + delta;
+    if (next < 1) setCursor({ year: cursor.year - 1, month: 12 });
+    else if (next > 12) setCursor({ year: cursor.year + 1, month: 1 });
+    else setCursor({ year: cursor.year, month: next });
   }
 
   const week = weekStart(selected);
@@ -65,10 +70,10 @@ export default function CalendarScreen() {
   }
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
         <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-400/80">
-          Phase 3 · Calendar
+          Phase 4 · Calendar
         </p>
         <h1 className="text-2xl font-bold leading-tight text-slate-50">
           Plan the <span className="text-emerald-400">week</span>.
@@ -76,14 +81,22 @@ export default function CalendarScreen() {
       </div>
 
       <MonthCalendar
-        year={year}
-        month={month}
+        year={cursor.year}
+        month={cursor.month}
         selected={selected}
         today={today}
         planned={visiblePlanned}
-        onSelect={setSelected}
+        onSelect={onSelect}
         onNavigate={navigate}
       />
+
+      <button
+        type="button"
+        onClick={() => onOpenDay(selected)}
+        className="min-h-[48px] rounded-2xl bg-emerald-500 text-sm font-bold text-slate-950"
+      >
+        Open workout
+      </button>
 
       <WeekPlanner
         weekStartKey={week}

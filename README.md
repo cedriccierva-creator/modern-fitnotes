@@ -23,4 +23,10 @@ stops for review. `src/db/README.md` tracks where the persistence layer lands.
 Phase 3 — interactive monthly calendar (Monday-first, 6-row grid) and the routine
 planner: PPLUL, ULUL, PPLPPL and Full Body ×3, applied to the current Monday-first
 week. Presets only ever fill days without a logged workout, and re-applying is
-idempotent. No exercise logging, PRs or JSON backup yet.
+idempotent.
+
+Phase 4 adds exercise management and logging: an exercise library with rename,
+delete and reorder, three intensity presets that generate editable set rows, and
+per-set weight/reps entry with an lbs/kg toggle. Weights are stored in kilograms
+and converted only for display; reps are integers. Past workouts keep the
+exercise name they were performed under. No PR calculations or backup yet.
