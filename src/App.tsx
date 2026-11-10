@@ -1,11 +1,11 @@
 import AppShell from './components/AppShell';
-import HomeScreen from './screens/HomeScreen';
+import CalendarScreen from './screens/CalendarScreen';
 
-/** Phase 1: one shell, one placeholder screen. Routing arrives with the calendar. */
+/** Phase 3: the calendar and routine planner are the whole screen. */
 export default function App() {
   return (
     <AppShell>
-      <HomeScreen />
+      <CalendarScreen />
     </AppShell>
   );
 }

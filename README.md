@@ -20,6 +20,7 @@ stops for review. `src/db/README.md` tracks where the persistence layer lands.
 
 ## Current state
 
-Phase 2 — database foundation: Dexie schema and TypeScript models for workout
-days, exercises, session exercises, sets and settings. No UI, calendar, routines
-or import/export yet.
+Phase 3 — interactive monthly calendar (Monday-first, 6-row grid) and the routine
+planner: PPLUL, ULUL, PPLPPL and Full Body ×3, applied to the current Monday-first
+week. Presets only ever fill days without a logged workout, and re-applying is
+idempotent. No exercise logging, PRs or JSON backup yet.

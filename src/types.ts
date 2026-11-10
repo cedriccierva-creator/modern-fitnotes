@@ -8,10 +8,13 @@
  * - `weightKg` is always kilograms. Pounds are a display concern only, which
  *   keeps any future unit switch lossless.
  * - `reps` is an integer.
- * - `exerciseName` is a historical snapshot on the session row, so renaming or
- *   archiving an Exercise never rewrites what was actually performed.
+ * - `exerciseName` and `label` are historical snapshots, so renaming or
+ *   archiving a library row never rewrites what was actually performed.
  * - `createdAt` / `updatedAt` are epoch milliseconds.
  */
+
+/** The training focus of a day. Doubles as the routine-preset building block. */
+export type WorkoutCategory = 'push' | 'pull' | 'legs' | 'upper' | 'lower' | 'fullBody';
 
 /** The unit the user prefers to *see*. Storage is always kg. */
 export type WeightUnit = 'kg' | 'lb';
@@ -33,10 +36,7 @@ export interface Exercise {
   /** Free-form grouping such as "chest" or "quads"; not an enum yet. */
   muscleGroup?: string;
   notes?: string;
-  /**
-   * Archived exercises stay referenced by history but are hidden from pickers.
-   * IndexedDB cannot index booleans, so this is filtered in memory.
-   */
+  /** Archived exercises stay referenced by history but are hidden from pickers. */
   archived?: boolean;
   createdAt: number;
   updatedAt: number;
@@ -69,6 +69,24 @@ export interface WorkoutSet {
   /** Integer reps. `null` means not filled in yet. */
   reps: number | null;
   completed: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * A *planned* day from a routine preset. This table is separate from
+ * WorkoutDay precisely so planning can never overwrite a log: applying,
+ * editing or clearing a preset only ever writes here.
+ */
+export interface PlannedDay {
+  id: string;
+  /** Local calendar day, "YYYY-MM-DD". Unique across the table. */
+  date: string;
+  /** Which preset created this, so re-applying is idempotent and clearable. */
+  presetId: string;
+  /** Historical snapshot of the template, so preset rewrites do not rewrite history. */
+  label: string;
+  category: WorkoutCategory;
   createdAt: number;
   updatedAt: number;
 }

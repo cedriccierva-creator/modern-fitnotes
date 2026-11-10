@@ -44,12 +44,13 @@ describe('schema', () => {
 
     expect(db.tables.map((table) => table.name).sort()).toEqual([
       'exercises',
+      'plannedDays',
       'settings',
       'workoutDays',
       'workoutExercises',
       'workoutSets',
     ]);
-    expect(db.verno).toBe(1);
+    expect(db.verno).toBe(2);
     expect(await db.workoutDays.count()).toBe(0);
   });
 });
