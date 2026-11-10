@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased;
+  }
+}
+
+@layer utilities {
+  /* Faint emerald bloom at the top so flat slate never reads as dead space. */
+  .app-aura {
+    background-image: radial-gradient(
+      65% 38% at 50% 0%,
+      rgba(16, 185, 129, 0.16),
+      transparent 72%
+    );
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dev-dist/
+coverage/
+*.local
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Android/Capacitor build output
+android/app/build/
+android/.gradle/
+android/local.properties
