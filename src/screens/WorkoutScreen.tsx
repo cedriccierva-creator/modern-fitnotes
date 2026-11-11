@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AddExercise from '../components/AddExercise';
 import ExerciseBlock from '../components/ExerciseBlock';
 import IntensityPicker from '../components/IntensityPicker';
@@ -15,10 +15,17 @@ import {
 import type { SessionExercise } from '../db/workout';
 import type { TogglePatch } from '../components/SetRow';
 import { createExercise, deleteExercise, loadExercises, renameExercise } from '../db/exercises';
+import {
+  adoptCatalogExercise,
+  catalogEntryToExercise,
+  findNameCollisions,
+} from '../db/exerciseCatalog';
+import { CATALOG, type CatalogExercise } from '../lib/exerciseCatalog';
 import { getPRsForExercise } from '../db/personalRecords';
 import { loadWeightUnit, setWeightUnit } from '../db/settings';
 import { findIntensity } from '../lib/intensity';
 import type { IntensityId } from '../lib/intensity';
+import { normalizeExerciseName } from '../lib/exerciseCatalog';
 import { formatDateLabel } from '../lib/month';
 import type { ExercisePR } from '../lib/pr';
 import type { Exercise, WorkoutSet } from '../types';
@@ -48,6 +55,26 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
    * touching state.
    */
   const generation = useRef(0);
+
+  /**
+   * Catalog entries the library already covers, for the picker's "In library"
+   * state. Derived from the loaded rows on every render rather than stored, so
+   * it needs no extra state and cannot drift: adopting or deleting refreshes the
+   * library and the badges follow.
+   */
+  const adoptedCatalogIds = useMemo(() => {
+    const byName = new Map(library.map((row) => [normalizeExerciseName(row.name), row]));
+    const ids = new Set<string>();
+
+    for (const row of library) {
+      if (row.catalogId !== undefined) ids.add(row.catalogId);
+    }
+    // A row typed by hand before the catalog existed still covers the entry.
+    for (const entry of CATALOG) {
+      if (byName.has(normalizeExerciseName(entry.name))) ids.add(entry.id);
+    }
+    return ids;
+  }, [library]);
 
   const refresh = useCallback(() => {
     const ticket = ++generation.current;
@@ -107,8 +134,54 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
     refresh();
   }
 
+  /**
+   * Create a custom exercise, refusing to silently duplicate one that already
+   * exists. A name clash with the library or with a built-in catalog entry asks
+   * first; declining returns to the form with the name kept in place.
+   */
   async function create(name: string, muscleGroup: string): Promise<void> {
+    const collisions = await findNameCollisions(name);
+
+    if (collisions.library !== undefined) {
+      const reuse = window.confirm(
+        `"${collisions.library.name}" is already in your library. Add it to today instead of creating a duplicate?`,
+      );
+      if (!reuse) return;
+      await attach(collisions.library);
+      return;
+    }
+
+    const catalogMatch = collisions.catalog[0];
+    if (catalogMatch !== undefined) {
+      const adopt = window.confirm(
+        `"${catalogMatch.name}" is already in the built-in catalog. Add that one to today instead of creating a custom copy?`,
+      );
+      if (!adopt) return;
+      await attach(catalogEntryToExercise(catalogMatch));
+      return;
+    }
+
     await attach(await createExercise(name, muscleGroup));
+  }
+
+  /** Library-only: adopt a catalog suggestion without touching today's workout. */
+  async function adoptFromCatalog(entry: CatalogExercise): Promise<void> {
+    const outcome = await adoptCatalogExercise(entry.id, {
+      confirmNameCollision: (existing) =>
+        window.confirm(
+          `"${existing.name}" already exists in your library. Save this catalog exercise as a separate entry anyway?`,
+        ),
+    });
+
+    if (outcome.status === 'name-taken') {
+      console.warn('Adoption cancelled: name already taken', entry.name);
+    }
+    refresh();
+  }
+
+  /** Today-only: log a catalog suggestion without adopting it into the library. */
+  async function addCatalogToToday(entry: CatalogExercise): Promise<void> {
+    await attach(catalogEntryToExercise(entry));
   }
 
   /**
@@ -238,7 +311,14 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
         </p>
       ) : null}
 
-      <AddExercise library={library} onAdd={(exercise) => void attach(exercise)} onCreate={create} />
+      <AddExercise
+        library={library}
+        adoptedCatalogIds={adoptedCatalogIds}
+        onAddLibraryExercise={(exercise) => void attach(exercise)}
+        onAddToToday={(entry) => void addCatalogToToday(entry)}
+        onAdopt={(entry) => void adoptFromCatalog(entry)}
+        onCreate={create}
+      />
 
       <section className="flex flex-col gap-2 rounded-2xl bg-slate-900/50 p-3 ring-1 ring-inset ring-slate-800">
         <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Library</h3>

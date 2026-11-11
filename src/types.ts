@@ -38,6 +38,14 @@ export interface Exercise {
   notes?: string;
   /** Archived exercises stay referenced by history but are hidden from pickers. */
   archived?: boolean;
+  /**
+   * The built-in catalog entry this row was adopted from, if any.
+   *
+   * Provenance only: it is never used as the row id, so renaming the row keeps
+   * the link and a re-adopt can never collide with a user's edited copy. Absent
+   * for exercises the user typed in.
+   */
+  catalogId?: string;
   createdAt: number;
   updatedAt: number;
 }

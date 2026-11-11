@@ -30,3 +30,15 @@ delete and reorder, three intensity presets that generate editable set rows, and
 per-set weight/reps entry with an lbs/kg toggle. Weights are stored in kilograms
 and converted only for display; reps are integers. Past workouts keep the
 exercise name they were performed under. No PR calculations or backup yet.
+
+Phase 5 adds weight-only personal records — a view over the stored sets, never a
+persisted row — shown in the exercise header with a trophy on the record set.
+
+Phase 5c adds a built-in exercise catalog of 318 entries (168 gym, 106 home
+bodyweight, 44 minimal equipment), transcribed from the reference library. It is
+**static application data** (`src/lib/exerciseCatalog.ts`) and is never inserted
+into IndexedDB: a fresh install browses the whole catalog with zero writes. The
+picker keeps two actions separate — *Add to today* logs a suggestion without
+adopting it, *Add to library* adopts it for future use. Adoption is idempotent
+and recorded as `Exercise.catalogId`; there are no deletion tombstones, so a
+deleted entry simply becomes a suggestion again.
