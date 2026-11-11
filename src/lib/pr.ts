@@ -13,8 +13,9 @@
  *   workout, never produce a second PR.
  * - One trophy per exercise per workout day: the heaviest set that beats the
  *   earlier all-time best. On a tie inside the day, the earliest set wins.
- * - Weights are stored in kilograms at 0.01 kg (`roundKg`), so comparisons use
- *   the stored value with a float epsilon and no second rounding grid.
+ * - Weights are stored in kilograms at 0.001 kg (`roundKg`, src/lib/units.ts),
+ *   so comparisons use the stored value with a float epsilon and no second
+ *   rounding grid: this file never rounds a weight.
  * - Ordering is explicit -- (date, exercise position, setNumber, createdAt, id)
  *   -- never inherited from a Dexie index scan, which is [index, primaryKey]
  *   order and therefore uuid order.
@@ -28,9 +29,9 @@ import type { WeightUnit } from '../types';
 /**
  * Float tolerance for comparison.
  *
- * Stored weights already sit on the 0.01 kg grid produced by `roundKg`; the only
- * difference a true tie can show is binary-float noise, which is far below the
- * epsilon. A real 0.01 kg step (102.07 vs 102.06) always wins.
+ * Stored weights already sit on the 0.001 kg grid produced by `roundKg`; the
+ * only difference a true tie can show is binary-float noise, which is far below
+ * the epsilon. A real 0.001 kg step (102.059 vs 102.058) always wins.
  */
 const EPSILON = 1e-9;
 
@@ -106,7 +107,8 @@ export function isImprovement(value: number, best: number): boolean {
 /**
  * What a weight typed in `unit` is stored as, through the real input path
  * (`parseWeightInput` -> `lbToKg` -> `roundKg`). Unit equivalence lives here so
- * callsites and tests share one definition; it introduces no new grid.
+ * callsites and tests share one definition; it introduces no new grid -- the
+ * only grid is `roundKg`'s 0.001 kg.
  */
 export function toCanonicalKg(value: number, unit: WeightUnit = 'kg'): number {
   return parseWeightInput(String(value), unit) ?? 0;

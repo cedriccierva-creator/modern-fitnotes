@@ -27,9 +27,19 @@ export function parseWeightInput(raw: string, unit: 'kg' | 'lb'): number | null 
   return unit === 'lb' ? roundKg(lbToKg(value)) : roundKg(value);
 }
 
-/** Kilograms are kept to 2dp: enough for 0.1 lb precision, no float noise. */
+/**
+ * The one canonical storage grid: kilograms at 0.001 kg.
+ *
+ * Stored weights, and therefore every PR comparison, sit on this grid. There is
+ * deliberately only this single rounding step in the app -- a consumer that
+ * rounds again (e.g. the PR engine) would create a second grid and could make a
+ * genuine improvement disappear.
+ */
+export const KG_STORAGE_DECIMALS = 3;
+
 export function roundKg(kg: number): number {
-  return Math.round(kg * 100) / 100;
+  const factor = 10 ** KG_STORAGE_DECIMALS;
+  return Math.round(kg * factor) / factor;
 }
 
 /** Integer reps only — a partial rep is not a rep. */
@@ -41,8 +51,23 @@ export function parseRepInput(raw: string): number | null {
   return value;
 }
 
+/**
+ * Format a stored kilogram value for display, with trailing zeros trimmed.
+ *
+ * Both units show the full 0.001 kg storage resolution. That matters: a coarser
+ * pound display would not round-trip -- re-entering the shown value would move
+ * the stored weight (a 1dp pound display changes 97.8% of stored values when
+ * re-entered). Keeping 3dp makes display -> edit -> store lossless, at the cost
+ * of cosmetic surprises such as 225 lb coming back as 224.999 lb, because the
+ * stored 102.058 kg is authoritative.
+ */
 export function formatWeight(kg: number | null, unit: 'kg' | 'lb'): string {
   if (kg === null || !Number.isFinite(kg)) return '';
   const value = convertWeight(kg, unit);
-  return unit === 'lb' ? value.toFixed(1) : String(roundKg(value));
+  return trimZeros(value.toFixed(KG_STORAGE_DECIMALS));
+}
+
+/** "220.460" -> "220.46", "135.000" -> "135", "0.000" -> "0". */
+function trimZeros(text: string): string {
+  return text.includes('.') ? text.replace(/\.?0+$/, '') || '0' : text;
 }

@@ -56,8 +56,9 @@ describe('intensity picker', () => {
 describe('set row', () => {
   it('shows the stored kilogram value in the display unit', () => {
     renderRow();
-    // 61.2344 kg ≈ 135.0 lb
-    expect((screen.getByPlaceholderText('lb') as HTMLInputElement).value).toBe('135.0');
+    // 61.2344 kg = 134.99930... lb, shown at the 0.001 kg resolution with zeros
+    // trimmed. The stored kilogram value is authoritative, so this is not 135.0.
+    expect((screen.getByPlaceholderText('lb') as HTMLInputElement).value).toBe('134.999');
     expect((screen.getByPlaceholderText('reps') as HTMLInputElement).value).toBe('8');
   });
 
@@ -67,7 +68,8 @@ describe('set row', () => {
 
     fireEvent.change(weight, { target: { value: '150' } });
     fireEvent.blur(weight);
-    expect(onChange).toHaveBeenCalledWith({ weightKg: 68.04 });
+    // 150 lb = 68.0388555 kg -> 68.039 on the 0.001 kg grid.
+    expect(onChange).toHaveBeenCalledWith({ weightKg: 68.039 });
 
     const reps = screen.getByPlaceholderText('reps');
     fireEvent.change(reps, { target: { value: '12' } });

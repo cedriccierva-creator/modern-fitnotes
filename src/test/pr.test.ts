@@ -5,7 +5,7 @@ import { createExercise } from '../db/exercises';
 import { deleteSet, ensureWorkoutDay, updateSet } from '../db/workout';
 import { getPRsForExercise } from '../db/personalRecords';
 import { computeExercisePr, isImprovement, toCanonicalKg } from '../lib/pr';
-import { parseWeightInput } from '../lib/units';
+import { formatWeight, parseWeightInput } from '../lib/units';
 import { newId } from '../lib/id';
 import type { SetPerformance } from '../lib/pr';
 
@@ -126,30 +126,76 @@ describe('PR detection (weight only)', () => {
 
     await logSession('2026-11-01', deadlift.id, deadlift.name, [{ weightKg: kg }]);
     await logSession('2026-11-02', deadlift.id, deadlift.name, [{ weightKg: lb }]);
-    await logSession('2026-11-03', deadlift.id, deadlift.name, [
-      { weightKg: toCanonicalKg(220.46, 'lb') },
-    ]);
 
     expect(await currentWeight(deadlift.id)).toBe(100);
     expect(await trophies(deadlift.id)).toHaveLength(1);
   });
 
-  it('compares stored kg values at the storage resolution, through the input path', () => {
+  it('separates 220.46 lb from 220.462 lb at 0.001 kg', async () => {
+    const deadlift = await createExercise('Deadlift');
+    // 220.46 lb = 99.998974 kg -> 99.999; 220.462 lb = 99.999881 kg -> 100.
+    const lighter = toCanonicalKg(220.46, 'lb');
+    const heavier = toCanonicalKg(220.462, 'lb');
+    expect(lighter).toBe(99.999);
+    expect(heavier).toBe(100);
+
+    // Heavier first, lighter second: one trophy, and the lighter entry is not a PR.
+    await logSession('2026-11-01', deadlift.id, deadlift.name, [{ weightKg: heavier }]);
+    await logSession('2026-11-02', deadlift.id, deadlift.name, [{ weightKg: lighter }]);
+    let pr = await getPRsForExercise(deadlift.id);
+    expect(pr.current?.weightKg).toBe(100);
+    expect(pr.trophySetIds).toHaveLength(1);
+
+    // The reverse order is a genuine (tiny) improvement: 99.999 -> 100.
+    await db.workoutDays.clear();
+    await db.workoutExercises.clear();
+    await db.workoutSets.clear();
+    await logSession('2026-11-01', deadlift.id, deadlift.name, [{ weightKg: lighter }]);
+    await logSession('2026-11-02', deadlift.id, deadlift.name, [{ weightKg: heavier }]);
+    pr = await getPRsForExercise(deadlift.id);
+    expect(pr.history.map((set) => set.weightKg)).toEqual([99.999, 100]);
+  });
+
+  it('does not invent a PR when a value is redisplayed and re-entered', async () => {
+    const deadlift = await createExercise('Deadlift');
+    const stored = parseWeightInput('220.462', 'lb') as number;
+
+    // Simulate the UI: show the stored value, then store what the input parses to.
+    const shown = formatWeight(stored, 'lb');
+    const reentered = parseWeightInput(shown, 'lb') as number;
+    expect(shown).toBe('220.462');
+    expect(reentered).toBe(stored);
+
+    await logSession('2026-11-01', deadlift.id, deadlift.name, [{ weightKg: stored }]);
+    await logSession('2026-11-04', deadlift.id, deadlift.name, [{ weightKg: reentered }]);
+    await logSession('2026-11-08', deadlift.id, deadlift.name, [
+      { weightKg: parseWeightInput(formatWeight(stored, 'kg'), 'kg') as number },
+    ]);
+
+    expect(await currentWeight(deadlift.id)).toBe(stored);
+    expect(await trophies(deadlift.id)).toHaveLength(1);
+  });
+
+  it('compares stored kg values at 0.001 kg, through the input path only', () => {
     const stored = (raw: string, unit: 'kg' | 'lb') => parseWeightInput(raw, unit) as number;
 
-    expect(stored('225', 'lb')).toBe(102.06);
-    expect(stored('102.058', 'kg')).toBe(102.06);
+    // Equivalent entries tie exactly.
+    expect(stored('225', 'lb')).toBe(102.058);
+    expect(stored('102.058', 'kg')).toBe(102.058);
     expect(isImprovement(stored('225', 'lb'), stored('102.058', 'kg'))).toBe(false);
 
     expect(stored('220.462', 'lb')).toBe(100);
     expect(isImprovement(stored('100', 'kg'), stored('220.462', 'lb'))).toBe(false);
 
-    // 220.46 lb stores as 100.00 kg too: a tie at the stored resolution.
-    expect(stored('220.46', 'lb')).toBe(100);
+    // Not a tie: 220.46 lb is 99.999 kg, one milli-kilo below 100 kg.
+    expect(stored('220.46', 'lb')).toBe(99.999);
     expect(isImprovement(stored('220.46', 'lb'), stored('100', 'kg'))).toBe(false);
+    expect(isImprovement(stored('100', 'kg'), stored('220.46', 'lb'))).toBe(true);
 
+    // Genuine improvements, including the smallest step the grid can express.
     expect(isImprovement(stored('100.5', 'kg'), stored('220.462', 'lb'))).toBe(true);
-    expect(isImprovement(stored('102.07', 'kg'), stored('102.06', 'kg'))).toBe(true);
+    expect(isImprovement(stored('102.059', 'kg'), stored('102.058', 'kg'))).toBe(true);
+    expect(isImprovement(stored('102.058', 'kg'), stored('102.058', 'kg'))).toBe(false);
   });
 
   it('ignores blank weights and incomplete sets', async () => {
