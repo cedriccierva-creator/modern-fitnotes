@@ -254,6 +254,7 @@ describe('PR engine edge cases', () => {
     exerciseId: 'exercise',
     exerciseName: 'Squat',
     date: '2026-11-01',
+    exerciseOrder: 0,
     setNumber: 1,
     weightKg: 100,
     reps: 5,

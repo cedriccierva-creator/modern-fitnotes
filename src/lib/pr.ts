@@ -19,6 +19,11 @@
  * - Only completed sets count: planned or half-filled rows are not performances.
  * - Bodyweight sets (`weightKg: null`) still count as rep performances, so they
  *   are never treated as a 0 kg lift.
+ * - Ordering is *explicit*, never inherited from a Dexie index scan: sets sort
+ *   by (date, exercise position in the session, setNumber, createdAt, id).
+ *   A workoutDay's `date` is unique in the schema, but an exercise may appear
+ *   more than once in a day (two WorkoutExercise rows), so the session position
+ *   is what decides between them.
  */
 import { lbToKg, roundKg } from './units';
 import type { WeightUnit } from '../types';
@@ -49,6 +54,8 @@ export interface SetPerformance {
   exerciseName: string;
   /** Local calendar day, "YYYY-MM-DD". */
   date: string;
+  /** Position of this exercise row within its session (WorkoutExercise.order). */
+  exerciseOrder: number;
   setNumber: number;
   weightKg: number | null;
   reps: number | null;
@@ -119,8 +126,18 @@ export function isImprovement(value: number, best: number): boolean {
   return Number.isFinite(value) && value > best + EPSILON;
 }
 
-function compareChronological(a: SetPerformance, b: SetPerformance): number {
+/**
+ * The one ordering the engine uses: (date, exercise position, setNumber,
+ * createdAt, id).
+ *
+ * Nothing here relies on IndexedDB cursor order, which is key order on
+ * [index, primaryKey] and carries no insertion guarantee. `id` is the final
+ * tiebreak so the sort is total: two sets can never compare equal, so the same
+ * history always produces the same records whatever order it is fed in.
+ */
+export function comparePrOrder(a: SetPerformance, b: SetPerformance): number {
   if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+  if (a.exerciseOrder !== b.exerciseOrder) return a.exerciseOrder - b.exerciseOrder;
   if (a.setNumber !== b.setNumber) return a.setNumber - b.setNumber;
   const aCreated = a.createdAt ?? 0;
   const bCreated = b.createdAt ?? 0;
@@ -164,7 +181,7 @@ export function computePersonalRecords(inputs: readonly SetPerformance[]): Perso
   const records: PersonalRecord[] = [];
 
   for (const [exerciseId, sets] of groups) {
-    const ordered = [...sets].sort(compareChronological);
+    const ordered = [...sets].sort(comparePrOrder);
     const best = new Map<PrMetric, PrEntry>();
     const improvements: PrEntry[] = [];
     let exerciseName = '';

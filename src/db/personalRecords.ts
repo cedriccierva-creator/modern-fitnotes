@@ -27,7 +27,10 @@ export async function loadPrInputs(): Promise<SetPerformance[]> {
 
   const dateByDayId = new Map(days.map((day) => [day.id, day.date]));
   const sessionById = new Map(
-    sessionRows.map((row) => [row.id, { exerciseId: row.exerciseId, exerciseName: row.exerciseName }]),
+    sessionRows.map((row) => [
+      row.id,
+      { exerciseId: row.exerciseId, exerciseName: row.exerciseName, order: row.order },
+    ]),
   );
 
   const inputs: SetPerformance[] = [];
@@ -45,6 +48,7 @@ export async function loadPrInputs(): Promise<SetPerformance[]> {
       exerciseId: session.exerciseId,
       exerciseName: session.exerciseName,
       date,
+      exerciseOrder: session.order,
       setNumber: set.setNumber,
       weightKg: set.weightKg,
       reps: set.reps,
