@@ -111,7 +111,9 @@ describe('set logging', () => {
     const sets = await reopened.workoutSets.where('workoutExerciseId').equals(session.id).toArray();
     expect(stored?.exerciseName).toBe('Bench Press');
     expect(sets).toHaveLength(3);
-    expect(sets[0]).toMatchObject({ weightKg: 100, reps: 8, completed: true });
+    // Select by setNumber: an index scan is not guaranteed to return insertion order.
+    const firstSet = sets.find((set) => set.setNumber === 1);
+    expect(firstSet).toMatchObject({ weightKg: 100, reps: 8, completed: true });
     expect(findIntensity('universal').repMax).toBe(12);
 
     await reopened.delete();
