@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import AddExercise from '../components/AddExercise';
 import ExerciseBlock from '../components/ExerciseBlock';
 import IntensityPicker from '../components/IntensityPicker';
@@ -13,11 +13,14 @@ import {
   updateSet,
 } from '../db/workout';
 import type { SessionExercise } from '../db/workout';
+import type { TogglePatch } from '../components/SetRow';
 import { createExercise, deleteExercise, loadExercises, renameExercise } from '../db/exercises';
+import { getPRsForExercise } from '../db/personalRecords';
 import { loadWeightUnit, setWeightUnit } from '../db/settings';
 import { findIntensity } from '../lib/intensity';
 import type { IntensityId } from '../lib/intensity';
 import { formatDateLabel } from '../lib/month';
+import type { ExercisePR } from '../lib/pr';
 import type { Exercise, WorkoutSet } from '../types';
 
 /**
@@ -33,13 +36,53 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
   const [library, setLibrary] = useState<readonly Exercise[]>([]);
   const [unit, setUnit] = useState<'kg' | 'lb'>('kg');
   const [intensity, setIntensity] = useState<IntensityId>('universal');
+  /**
+   * Personal records keyed by exercise id, never by session id: one exercise can
+   * appear twice in a day, and both blocks then show the same current PR.
+   */
+  const [prs, setPrs] = useState<ReadonlyMap<string, ExercisePR>>(() => new Map());
+
+  /**
+   * Monotonic ticket for the newest refresh. A slower, older refresh must never
+   * write over a newer one, which is why every async result checks this before
+   * touching state.
+   */
+  const generation = useRef(0);
 
   const refresh = useCallback(() => {
+    const ticket = ++generation.current;
+
     void loadDay(date).then((details) => {
+      if (ticket !== generation.current) return;
       setDayId(details.day?.id ?? null);
       setSessions(details.exercises);
+
+      // One PR read per distinct exercise, not per session row.
+      const exerciseIds = [...new Set(details.exercises.map((session) => session.exerciseId))];
+
+      void Promise.allSettled(exerciseIds.map((id) => getPRsForExercise(id))).then((results) => {
+        if (ticket !== generation.current) return;
+
+        const next = new Map<string, ExercisePR>();
+        results.forEach((result, index) => {
+          // A failed lookup is left out of the map, so the UI shows no PR rather
+          // than a stale one. Logging keeps working either way.
+          if (result.status === 'fulfilled') next.set(exerciseIds[index], result.value);
+        });
+        setPrs(next);
+      });
     });
-    void loadExercises().then(setLibrary);
+
+    void loadExercises().then((rows) => {
+      if (ticket !== generation.current) return;
+      setLibrary(rows);
+    });
+  }, [date]);
+
+  // Switching dates drops the previous day's records immediately, so a slow
+  // first load on the new date cannot show the old date's trophies.
+  useEffect(() => {
+    setPrs(new Map());
   }, [date]);
 
   useEffect(refresh, [refresh]);
@@ -68,13 +111,38 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
     await attach(await createExercise(name, muscleGroup));
   }
 
-  async function toggle(setId: string, completed: boolean): Promise<void> {
-    await updateSet(setId, { completed: !completed });
+  /**
+   * Flip completion, recording any unsaved weight draft in the same write.
+   *
+   * Exactly one `updateSet` and one `refresh`: the weight is in the database
+   * before the row is re-rendered, so a typed value is never dropped by the
+   * refresh that follows a toggle. The promise rejects if the write fails, which
+   * is how `SetRow` knows not to treat the draft as saved.
+   */
+  async function toggle(setId: string, completed: boolean, patch?: TogglePatch): Promise<void> {
+    const next = { completed: !completed, ...patch };
+    try {
+      await updateSet(setId, next);
+    } catch (error) {
+      // Logging must keep working even if this row could not be written.
+      console.error('Could not update set', setId, error);
+      return;
+    }
     refresh();
   }
 
+  /**
+   * Persist a non-toggle patch (blur commits, reps). Resolves only after the
+   * write and the refresh, and rejects when the write fails so the caller can
+   * keep the value pending instead of pretending it was saved.
+   */
   async function patchSet(setId: string, patch: { weightKg?: number | null; reps?: number | null }): Promise<void> {
-    await updateSet(setId, patch);
+    try {
+      await updateSet(setId, patch);
+    } catch (error) {
+      console.error('Could not save set weight', setId, error);
+      throw error;
+    }
     refresh();
   }
 
@@ -148,14 +216,15 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
           total={sessions.length}
           unit={unit}
           intensity={intensity}
+          pr={prs.get(session.exerciseId) ?? null}
           onMove={(direction) => void move(index, direction)}
           onRename={(name) => void updateSessionName(session.id, name).then(refresh)}
           onDeleteExercise={() => void removeExercise(session)}
           onAddSet={() => void addSet(session)}
-          onChangeSet={(setId, patch) => void patchSet(setId, patch)}
-          onToggleSet={(setId) => {
+          onChangeSet={(setId, patch) => patchSet(setId, patch)}
+          onToggleSet={(setId, patch) => {
             const set = session.sets.find((row) => row.id === setId);
-            if (set) void toggle(setId, set.completed);
+            return set === undefined ? Promise.resolve() : toggle(setId, set.completed, patch);
           }}
           onDeleteSet={(setId) => {
             void deleteSet(setId).then(refresh);

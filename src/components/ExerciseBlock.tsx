@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react';
 import SetRow from './SetRow';
 import { findIntensity, intensityFromNote } from '../lib/intensity';
+import { formatWeight } from '../lib/units';
 import type { IntensityId } from '../lib/intensity';
 import type { SessionExercise } from '../db/workout';
+import type { TogglePatch } from './SetRow';
+import type { ExercisePR } from '../lib/pr';
 
 interface Props {
   session: SessionExercise;
@@ -10,13 +13,21 @@ interface Props {
   total: number;
   unit: 'kg' | 'lb';
   intensity: IntensityId;
+  /**
+   * Already-computed PRs for this exercise, from `getPRsForExercise`.
+   * Absent while loading, on failure, or when the exercise has no PR. This
+   * component only formats what it is given; it never computes a record.
+   */
+  pr?: ExercisePR | null;
   onMove: (direction: -1 | 1) => void;
   /** Renames this day's row only; the library row is left alone. */
   onRename: (name: string) => void;
   onDeleteExercise: () => void;
   onAddSet: () => void;
-  onChangeSet: (setId: string, patch: { weightKg?: number | null; reps?: number | null }) => void;
-  onToggleSet: (setId: string) => void;
+  /** Resolves once persisted; rejects if the write failed. */
+  onChangeSet: (setId: string, patch: { weightKg?: number | null; reps?: number | null }) => void | Promise<void>;
+  /** Completion toggle; `patch` carries an unsaved weight draft, if any. */
+  onToggleSet: (setId: string, patch?: TogglePatch) => void | Promise<void>;
   onDeleteSet: (setId: string) => void;
 }
 
@@ -26,6 +37,7 @@ export default function ExerciseBlock({
   total,
   unit,
   intensity,
+  pr,
   onMove,
   onRename,
   onDeleteExercise,
@@ -43,6 +55,11 @@ export default function ExerciseBlock({
   const shown = intensity ?? createdUnder;
   const preset = findIntensity(shown);
   const done = session.sets.filter((set) => set.completed).length;
+
+  // Formatting only: the stored kilograms decide the record, `unit` decides how
+  // it reads. Re-derived on every render, so a unit switch needs no new query.
+  const currentPr = pr?.current ?? null;
+  const trophySetIds = pr?.trophySetIds ?? [];
 
   function commit(): void {
     if (draft.trim() !== '' && draft.trim() !== session.exerciseName) onRename(draft.trim());
@@ -97,6 +114,14 @@ export default function ExerciseBlock({
             {preset.name} · {preset.repMin}–{preset.repMax} reps ·{' '}
             <span className="text-emerald-400/80">{done}/{session.sets.length} done</span>
           </p>
+          {currentPr === null ? null : (
+            <p className="mt-0.5 text-[11px] font-semibold text-amber-300">
+              <span aria-hidden="true">★ </span>
+              <span aria-live="polite">
+                PR {formatWeight(currentPr.weightKg, unit)} {unit}
+              </span>
+            </p>
+          )}
         </div>
 
         <button
@@ -123,8 +148,9 @@ export default function ExerciseBlock({
             key={set.id}
             set={set}
             unit={unit}
+            isPr={trophySetIds.includes(set.id)}
             onChange={(patch) => onChangeSet(set.id, patch)}
-            onToggle={() => onToggleSet(set.id)}
+            onToggle={(patch) => onToggleSet(set.id, patch)}
             onDelete={() => onDeleteSet(set.id)}
           />
         ))}
