@@ -12,12 +12,14 @@ import {
 import {
   computePersonalRecords,
   estimateOneRepMax,
+  isImprovement,
   metricValue,
   toCanonicalKg,
   type PrMetric,
   type SetPerformance,
 } from '../lib/pr';
 import { newId } from '../lib/id';
+import { parseWeightInput } from '../lib/units';
 
 interface LoggedSet {
   weightKg: number | null;
@@ -141,7 +143,7 @@ describe('PR detection', () => {
     const deadlift = await createExercise('Deadlift');
     await logSession('2026-11-01', deadlift.id, deadlift.name, [{ weightKg: 100, reps: 1 }]);
 
-    // 220.46 lb is the same 100 kg after canonical rounding, not a new best.
+    // 220.46 lb is the same stored 100.00 kg, so it is not a new best.
     expect(toCanonicalKg(220.46, 'lb')).toBe(100);
     await logSession('2026-11-02', deadlift.id, deadlift.name, [
       { weightKg: toCanonicalKg(220.46, 'lb'), reps: 1 },
@@ -151,6 +153,29 @@ describe('PR detection', () => {
     expect(prValue(records, deadlift.id, 'weight')).toBe(100);
     expect(improvementCount(records, deadlift.id, 'weight')).toBe(1);
     expect(improvementCount(records, deadlift.id, 'e1rm')).toBe(1);
+  });
+
+  it('compares stored kg values only, at the storage resolution', async () => {
+    // Every value goes through the real input path: parseWeightInput -> roundKg.
+    const stored = (raw: string, unit: 'kg' | 'lb') => parseWeightInput(raw, unit) as number;
+
+    // 225 lb and 102.058 kg are the same stored weight.
+    expect(stored('225', 'lb')).toBe(102.06);
+    expect(stored('102.058', 'kg')).toBe(102.06);
+    expect(isImprovement(stored('225', 'lb'), stored('102.058', 'kg'))).toBe(false);
+
+    // 100 kg and 220.462 lb are the same stored weight.
+    expect(stored('220.462', 'lb')).toBe(100);
+    expect(isImprovement(stored('100', 'kg'), stored('220.462', 'lb'))).toBe(false);
+
+    // 220.46 lb also stores as 100.00 kg, so it ties too (documented, not a claim
+    // about exact arithmetic: 220.46 * 0.45359237 = 99.998974 kg).
+    expect(stored('220.46', 'lb')).toBe(100);
+    expect(isImprovement(stored('220.46', 'lb'), stored('100', 'kg'))).toBe(false);
+
+    // A real 0.01 kg step up is still an improvement, in either direction.
+    expect(isImprovement(stored('100.5', 'kg'), stored('220.462', 'lb'))).toBe(true);
+    expect(isImprovement(stored('102.07', 'kg'), stored('102.06', 'kg'))).toBe(true);
   });
 
   it('does not create duplicate PRs for repeated identical sets', async () => {

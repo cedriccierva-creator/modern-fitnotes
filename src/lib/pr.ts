@@ -6,10 +6,11 @@
  * (src/db/personalRecords.ts) only joins rows into `SetPerformance` values.
  *
  * Design decisions that matter:
- * - Storage is always kilograms (see src/types.ts), so a pound entry that was
- *   converted on input lands on the same canonical value. `toCanonicalKg()`
- *   rounds to the same 2dp grid as `roundKg()` so 220.46 lb and 100 kg are the
- *   *same* performance and never produce a conversion PR.
+ * - Storage is always kilograms at 0.01 kg (see `roundKg`), so a pound entry
+ *   converted on input lands on the same stored value as the equivalent kg
+ *   entry and never produces a conversion PR. Comparison happens on those
+ *   stored values with a float epsilon only -- there is no separate rounding
+ *   grid, so nothing can be lost between storage and comparison.
  * - A tie is not an improvement: only a strictly greater value (beyond a tiny
  *   epsilon that absorbs float noise) becomes a new PR. That is what stops
  *   duplicate PRs from repeated sets.
@@ -25,7 +26,7 @@
  *   more than once in a day (two WorkoutExercise rows), so the session position
  *   is what decides between them.
  */
-import { lbToKg, roundKg } from './units';
+import { parseWeightInput, roundKg } from './units';
 import type { WeightUnit } from '../types';
 
 /** Metrics the existing data model can express: weight, reps, set volume, estimated 1RM. */
@@ -39,7 +40,14 @@ export const PR_METRIC_LABELS: Record<PrMetric, string> = {
   e1rm: 'Best estimated 1RM',
 };
 
-/** Absolute tolerance when deciding whether a value actually improved. */
+/**
+ * Float tolerance for the comparison.
+ *
+ * Stored weights already sit on the 0.01 kg grid produced by `roundKg`, so the
+ * only difference a genuine tie can show is binary-float noise (0.01 kg is not
+ * representable exactly). The epsilon is far below the 0.01 kg storage step, so
+ * it can never absorb a real 0.01 kg improvement: 102.07 vs 102.06 still wins.
+ */
 const EPSILON = 1e-9;
 
 /**
@@ -87,11 +95,12 @@ export interface PersonalRecord {
 }
 
 /**
- * Normalise a weight typed in `unit` to the canonical kilogram grid.
- * Feeding the same physical weight in kg or lb yields the same number.
+ * What a weight typed in `unit` is stored as, i.e. the same path the UI uses
+ * (`parseWeightInput` -> `lbToKg` -> `roundKg`). Provided so callsites and tests
+ * express unit equivalence through one function; it defines no new grid.
  */
 export function toCanonicalKg(value: number, unit: WeightUnit = 'kg'): number {
-  return roundKg(unit === 'lb' ? lbToKg(value) : value);
+  return parseWeightInput(String(value), unit) ?? 0;
 }
 
 /** Epley estimate, rounded like every other stored weight. Reps of 1 are the lift itself. */
@@ -111,7 +120,8 @@ export function metricValue(
 
   switch (metric) {
     case 'weight':
-      return hasWeight ? roundKg(weightKg) : null;
+      // Compare the stored value as-is; `roundKg` here would be a second grid.
+      return hasWeight ? weightKg : null;
     case 'reps':
       return hasReps ? reps : null;
     case 'volume':
@@ -121,9 +131,10 @@ export function metricValue(
   }
 }
 
-/** Strict improvement; equal performances are explicitly not PRs. */
+/** Strict improvement; equal performances (within float noise) are not PRs. */
 export function isImprovement(value: number, best: number): boolean {
-  return Number.isFinite(value) && value > best + EPSILON;
+  if (!Number.isFinite(value) || !Number.isFinite(best)) return false;
+  return value - best > EPSILON;
 }
 
 /**
