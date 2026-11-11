@@ -7,45 +7,48 @@
  * makes stale records structurally impossible.
  */
 import { db } from './db';
-import {
-  computePersonalRecords,
-  recordHitsForDate,
-  type PersonalRecord,
-  type PrEntry,
-  type SetPerformance,
-} from '../lib/pr';
+import { computeExercisePr, type ExercisePR, type SetPerformance } from '../lib/pr';
 
-/** Join days, session rows and sets into the flat shape the engine consumes. */
-export async function loadPrInputs(): Promise<SetPerformance[]> {
+const EMPTY_PR = (exerciseId: string): ExercisePR => ({
+  exerciseId,
+  exerciseName: '',
+  current: null,
+  history: [],
+  trophySetIds: [],
+});
+
+/**
+ * Join one exercise's session rows, sets and days into the flat shape the
+ * engine consumes. Scoped by exerciseId so a PR read never scans every set in
+ * the database.
+ */
+export async function loadExercisePerformance(exerciseId: string): Promise<SetPerformance[]> {
   await db.open();
 
-  const [days, sessionRows, sets] = await Promise.all([
-    db.workoutDays.toArray(),
-    db.workoutExercises.toArray(),
-    db.workoutSets.toArray(),
-  ]);
+  const sessions = await db.workoutExercises.where('exerciseId').equals(exerciseId).toArray();
+  if (sessions.length === 0) return [];
 
+  const sets = await db.workoutSets
+    .where('workoutExerciseId')
+    .anyOf(sessions.map((session) => session.id))
+    .toArray();
+
+  const days = await db.workoutDays.toArray();
   const dateByDayId = new Map(days.map((day) => [day.id, day.date]));
-  const sessionById = new Map(
-    sessionRows.map((row) => [
-      row.id,
-      { exerciseId: row.exerciseId, exerciseName: row.exerciseName, order: row.order },
-    ]),
-  );
+  const sessionById = new Map(sessions.map((session) => [session.id, session]));
 
-  const inputs: SetPerformance[] = [];
+  const performance: SetPerformance[] = [];
   for (const set of sets) {
     const session = sessionById.get(set.workoutExerciseId);
     const date = dateByDayId.get(set.workoutDayId);
-    // Orphaned rows (parent removed outside the normal delete path) are skipped
-    // rather than guessed at.
+    // Orphaned rows are skipped rather than guessed at.
     if (session === undefined || date === undefined) continue;
 
-    inputs.push({
+    performance.push({
       setId: set.id,
       workoutExerciseId: set.workoutExerciseId,
       workoutDayId: set.workoutDayId,
-      exerciseId: session.exerciseId,
+      exerciseId,
       exerciseName: session.exerciseName,
       date,
       exerciseOrder: session.order,
@@ -57,31 +60,17 @@ export async function loadPrInputs(): Promise<SetPerformance[]> {
     });
   }
 
-  return inputs;
-}
-
-/** Current PRs for every exercise with at least one qualifying completed set. */
-export async function loadPersonalRecords(): Promise<PersonalRecord[]> {
-  return computePersonalRecords(await loadPrInputs());
+  return performance;
 }
 
 /**
- * Explicit recalculation entry point for edit/delete flows. It is the same
- * derivation as `loadPersonalRecords()`; the alias exists so callers can state
- * their intent and so tests can assert the two agree.
+ * The PR view for one exercise: current PR, the PR-setting sets in order, and
+ * their ids for marking rows. Always resolves -- an exercise with no qualifying
+ * set yields `current: null` and empty lists -- so callers never branch on
+ * `undefined`, and there is no state to go stale after an edit or delete.
  */
-export async function recalculatePersonalRecords(): Promise<PersonalRecord[]> {
-  return loadPersonalRecords();
-}
-
-/** PRs for one library exercise. History survives a deleted or renamed library row. */
-export async function loadExercisePersonalRecords(
-  exerciseId: string,
-): Promise<PersonalRecord | undefined> {
-  return (await loadPersonalRecords()).find((record) => record.exerciseId === exerciseId);
-}
-
-/** PR moments achieved on one local day, e.g. to highlight them in a session. */
-export async function loadRecordHitsForDate(date: string): Promise<PrEntry[]> {
-  return recordHitsForDate(await loadPersonalRecords(), date);
+export async function getPRsForExercise(exerciseId: string): Promise<ExercisePR> {
+  const history = await loadExercisePerformance(exerciseId);
+  if (history.length === 0) return EMPTY_PR(exerciseId);
+  return computeExercisePr(exerciseId, history);
 }

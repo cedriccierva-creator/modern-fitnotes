@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../db/db';
-import { loadExercisePersonalRecords } from '../db/personalRecords';
+import { getPRsForExercise } from '../db/personalRecords';
 import { newId } from '../lib/id';
 import type { WorkoutSet } from '../types';
 
@@ -79,10 +79,8 @@ async function seed(
 }
 
 async function weightProgression(exerciseId: string) {
-  const record = await loadExercisePersonalRecords(exerciseId);
-  return record?.improvements
-    .filter((entry) => entry.metric === 'weight')
-    .map((entry) => entry.value);
+  const record = await getPRsForExercise(exerciseId);
+  return record.history.map((set) => set.weightKg);
 }
 
 describe('PR ordering is explicit, not cursor order', () => {
@@ -95,17 +93,21 @@ describe('PR ordering is explicit, not cursor order', () => {
       { setId: 'wwww-set-4', setNumber: 4, weightKg: 90 },
     ];
 
-    // Ascending ids, ascending sets, sequential inserts.
+    // Ascending ids, ascending sets, sequential inserts. One trophy for the day:
+    // the heaviest set, which is set 4 regardless of how the rows are ordered.
     await seed('2026-11-01', exerciseId, rows, rows.map((row) => row.setId));
     const ascending = await weightProgression(exerciseId);
-    expect(ascending).toEqual([60, 80, 90]);
+    expect(ascending).toEqual([90]);
+    expect((await getPRsForExercise(exerciseId)).trophySetIds).toEqual(['wwww-set-4']);
 
     await db.delete();
     await db.open();
 
-    // Reverse ids, shuffled inserts: same history, so same PRs.
+    // Reverse ids, shuffled inserts: same history, so the same PRs and the same
+    // trophy identity -- the engine sorts, it does not trust cursor order.
     await seed('2026-11-01', exerciseId, rows, ['xxxx-set-3', 'zzzz-set-1', 'wwww-set-4', 'yyyy-set-2']);
     expect(await weightProgression(exerciseId)).toEqual(ascending);
+    expect((await getPRsForExercise(exerciseId)).trophySetIds).toEqual(['wwww-set-4']);
   });
 
   it('orders an exercise that appears twice in one day by session position', async () => {
@@ -117,10 +119,10 @@ describe('PR ordering is explicit, not cursor order', () => {
 
     // Reverse of the intended order, and ids that sort the other way.
     await seed('2026-11-01', exerciseId, rows, ['a-second-slot', 'b-first-slot']);
-    const record = await loadExercisePersonalRecords(exerciseId);
+    const record = await getPRsForExercise(exerciseId);
 
     // Identical weight in one day is one trophy, owned by the earlier position.
-    expect(record?.improvements.filter((entry) => entry.metric === 'weight')).toHaveLength(1);
-    expect(record?.metrics.weight?.setId).toBe('b-first-slot');
+    expect(record.history).toHaveLength(1);
+    expect(record.trophySetIds).toEqual(['b-first-slot']);
   });
 });

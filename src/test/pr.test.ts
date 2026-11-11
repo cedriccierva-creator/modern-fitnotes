@@ -3,27 +3,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../db/db';
 import { createExercise } from '../db/exercises';
 import { deleteSet, ensureWorkoutDay, updateSet } from '../db/workout';
-import {
-  loadExercisePersonalRecords,
-  loadPersonalRecords,
-  loadRecordHitsForDate,
-  recalculatePersonalRecords,
-} from '../db/personalRecords';
-import {
-  computePersonalRecords,
-  estimateOneRepMax,
-  isImprovement,
-  metricValue,
-  toCanonicalKg,
-  type PrMetric,
-  type SetPerformance,
-} from '../lib/pr';
-import { newId } from '../lib/id';
+import { getPRsForExercise } from '../db/personalRecords';
+import { computeExercisePr, isImprovement, toCanonicalKg } from '../lib/pr';
 import { parseWeightInput } from '../lib/units';
+import { newId } from '../lib/id';
+import type { SetPerformance } from '../lib/pr';
 
 interface LoggedSet {
   weightKg: number | null;
-  reps: number | null;
+  reps?: number | null;
   completed?: boolean;
 }
 
@@ -37,12 +25,13 @@ afterEach(async () => {
   await db.delete();
 });
 
-/** Write one session using the real tables and types, returning the set ids. */
+/** Write one session using the real tables, returning the set ids. */
 async function logSession(
   date: string,
   exerciseId: string,
   exerciseName: string,
   entries: readonly LoggedSet[],
+  order = 0,
 ): Promise<string[]> {
   const day = await ensureWorkoutDay(date);
   const now = Date.now();
@@ -53,7 +42,7 @@ async function logSession(
     workoutDayId: day.id,
     exerciseId,
     exerciseName,
-    order: 0,
+    order,
     createdAt: now,
     updatedAt: now,
   });
@@ -68,7 +57,7 @@ async function logSession(
       workoutDayId: day.id,
       setNumber: index + 1,
       weightKg: entry.weightKg,
-      reps: entry.reps,
+      reps: entry.reps ?? 5,
       completed: entry.completed ?? true,
       createdAt: now + index,
       updatedAt: now + index,
@@ -77,202 +66,217 @@ async function logSession(
   return ids;
 }
 
-function prValue(
-  records: Awaited<ReturnType<typeof loadPersonalRecords>>,
-  exerciseId: string,
-  metric: PrMetric,
-): number | undefined {
-  return records.find((record) => record.exerciseId === exerciseId)?.metrics[metric]?.value;
-}
+const trophies = async (exerciseId: string) => (await getPRsForExercise(exerciseId)).trophySetIds;
+const currentWeight = async (exerciseId: string) =>
+  (await getPRsForExercise(exerciseId)).current?.weightKg;
 
-function improvementCount(
-  records: Awaited<ReturnType<typeof loadPersonalRecords>>,
-  exerciseId: string,
-  metric: PrMetric,
-): number {
-  const record = records.find((row) => row.exerciseId === exerciseId);
-  return record?.improvements.filter((entry) => entry.metric === metric).length ?? 0;
-}
-
-describe('PR detection', () => {
-  it('records the first performance as a PR', async () => {
+describe('PR detection (weight only)', () => {
+  it('records the first performance as the PR', async () => {
     const squat = await createExercise('Squat');
-    await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100, reps: 5 }]);
+    const ids = await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100 }]);
 
-    const records = await loadPersonalRecords();
-    expect(prValue(records, squat.id, 'weight')).toBe(100);
-    expect(improvementCount(records, squat.id, 'weight')).toBe(1);
+    const pr = await getPRsForExercise(squat.id);
+    expect(pr.current?.weightKg).toBe(100);
+    expect(pr.current?.setId).toBe(ids[0]);
+    expect(pr.history).toHaveLength(1);
+    expect(pr.trophySetIds).toEqual([ids[0]]);
   });
 
-  it('detects a genuine improvement and keeps the progression in order', async () => {
+  it('detects a genuine improvement and keeps history in order', async () => {
     const squat = await createExercise('Squat');
-    await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100, reps: 5 }]);
-    await logSession('2026-11-03', squat.id, squat.name, [{ weightKg: 105, reps: 3 }]);
+    await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100 }]);
+    await logSession('2026-11-03', squat.id, squat.name, [{ weightKg: 105 }]);
 
-    const records = await loadPersonalRecords();
-    expect(prValue(records, squat.id, 'weight')).toBe(105);
-    const progression = records
-      .find((row) => row.exerciseId === squat.id)
-      ?.improvements.filter((entry) => entry.metric === 'weight')
-      .map((entry) => entry.value);
-    expect(progression).toEqual([100, 105]);
+    const pr = await getPRsForExercise(squat.id);
+    expect(pr.history.map((set) => set.weightKg)).toEqual([100, 105]);
+    expect(pr.current?.weightKg).toBe(105);
   });
 
   it('does not treat an equal performance as a new PR', async () => {
     const bench = await createExercise('Bench Press');
-    await logSession('2026-11-01', bench.id, bench.name, [{ weightKg: 80, reps: 5 }]);
-    await logSession('2026-11-05', bench.id, bench.name, [{ weightKg: 80, reps: 5 }]);
+    await logSession('2026-11-01', bench.id, bench.name, [{ weightKg: 80 }]);
+    await logSession('2026-11-05', bench.id, bench.name, [{ weightKg: 80 }]);
 
-    const records = await loadPersonalRecords();
-    expect(prValue(records, bench.id, 'weight')).toBe(80);
-    expect(improvementCount(records, bench.id, 'weight')).toBe(1);
-    expect(improvementCount(records, bench.id, 'e1rm')).toBe(1);
+    expect(await currentWeight(bench.id)).toBe(80);
+    expect(await trophies(bench.id)).toHaveLength(1);
   });
 
   it('does not treat a lower performance as a new PR', async () => {
     const bench = await createExercise('Bench Press');
-    await logSession('2026-11-01', bench.id, bench.name, [{ weightKg: 80, reps: 5 }]);
-    await logSession('2026-11-05', bench.id, bench.name, [{ weightKg: 70, reps: 5 }]);
+    await logSession('2026-11-01', bench.id, bench.name, [{ weightKg: 80 }]);
+    await logSession('2026-11-05', bench.id, bench.name, [{ weightKg: 70 }]);
 
-    const records = await loadPersonalRecords();
-    expect(prValue(records, bench.id, 'weight')).toBe(80);
-    expect(improvementCount(records, bench.id, 'weight')).toBe(1);
+    expect(await currentWeight(bench.id)).toBe(80);
+    expect(await trophies(bench.id)).toHaveLength(1);
   });
 
-  it('treats equivalent values in different units as the same performance', async () => {
+  it('keeps the first day when the same weight is hit again later', async () => {
     const deadlift = await createExercise('Deadlift');
-    await logSession('2026-11-01', deadlift.id, deadlift.name, [{ weightKg: 100, reps: 1 }]);
+    const first = await logSession('2026-11-01', deadlift.id, deadlift.name, [{ weightKg: 140 }]);
+    await logSession('2026-11-09', deadlift.id, deadlift.name, [{ weightKg: 140 }]);
 
-    // 220.46 lb is the same stored 100.00 kg, so it is not a new best.
-    expect(toCanonicalKg(220.46, 'lb')).toBe(100);
-    await logSession('2026-11-02', deadlift.id, deadlift.name, [
-      { weightKg: toCanonicalKg(220.46, 'lb'), reps: 1 },
+    expect(await trophies(deadlift.id)).toEqual([first[0]]);
+  });
+
+  it('treats equivalent values in mixed units as the same performance', async () => {
+    const deadlift = await createExercise('Deadlift');
+    const kg = parseWeightInput('100', 'kg') as number;
+    const lb = parseWeightInput('220.462', 'lb') as number;
+    expect(lb).toBe(kg);
+
+    await logSession('2026-11-01', deadlift.id, deadlift.name, [{ weightKg: kg }]);
+    await logSession('2026-11-02', deadlift.id, deadlift.name, [{ weightKg: lb }]);
+    await logSession('2026-11-03', deadlift.id, deadlift.name, [
+      { weightKg: toCanonicalKg(220.46, 'lb') },
     ]);
 
-    const records = await loadPersonalRecords();
-    expect(prValue(records, deadlift.id, 'weight')).toBe(100);
-    expect(improvementCount(records, deadlift.id, 'weight')).toBe(1);
-    expect(improvementCount(records, deadlift.id, 'e1rm')).toBe(1);
+    expect(await currentWeight(deadlift.id)).toBe(100);
+    expect(await trophies(deadlift.id)).toHaveLength(1);
   });
 
-  it('compares stored kg values only, at the storage resolution', async () => {
-    // Every value goes through the real input path: parseWeightInput -> roundKg.
+  it('compares stored kg values at the storage resolution, through the input path', () => {
     const stored = (raw: string, unit: 'kg' | 'lb') => parseWeightInput(raw, unit) as number;
 
-    // 225 lb and 102.058 kg are the same stored weight.
     expect(stored('225', 'lb')).toBe(102.06);
     expect(stored('102.058', 'kg')).toBe(102.06);
     expect(isImprovement(stored('225', 'lb'), stored('102.058', 'kg'))).toBe(false);
 
-    // 100 kg and 220.462 lb are the same stored weight.
     expect(stored('220.462', 'lb')).toBe(100);
     expect(isImprovement(stored('100', 'kg'), stored('220.462', 'lb'))).toBe(false);
 
-    // 220.46 lb also stores as 100.00 kg, so it ties too (documented, not a claim
-    // about exact arithmetic: 220.46 * 0.45359237 = 99.998974 kg).
+    // 220.46 lb stores as 100.00 kg too: a tie at the stored resolution.
     expect(stored('220.46', 'lb')).toBe(100);
     expect(isImprovement(stored('220.46', 'lb'), stored('100', 'kg'))).toBe(false);
 
-    // A real 0.01 kg step up is still an improvement, in either direction.
     expect(isImprovement(stored('100.5', 'kg'), stored('220.462', 'lb'))).toBe(true);
     expect(isImprovement(stored('102.07', 'kg'), stored('102.06', 'kg'))).toBe(true);
   });
 
-  it('does not create duplicate PRs for repeated identical sets', async () => {
-    const row = await createExercise('Barbell Row');
-    await logSession('2026-11-01', row.id, row.name, [
-      { weightKg: 60, reps: 8 },
-      { weightKg: 60, reps: 8 },
-      { weightKg: 60, reps: 8 },
-    ]);
-    await logSession('2026-11-04', row.id, row.name, [{ weightKg: 60, reps: 8 }]);
-
-    const records = await loadPersonalRecords();
-    expect(records).toHaveLength(1);
-    expect(improvementCount(records, row.id, 'weight')).toBe(1);
-    expect(improvementCount(records, row.id, 'volume')).toBe(1);
-  });
-
-  it('supports the metrics the model can express and ignores unfilled sets', async () => {
+  it('ignores blank weights and incomplete sets', async () => {
     const press = await createExercise('Overhead Press');
     await logSession('2026-11-01', press.id, press.name, [
-      { weightKg: 50, reps: 5 },
-      { weightKg: 60, reps: 3, completed: false },
-      { weightKg: null, reps: 12 },
-      { weightKg: 40, reps: null },
+      { weightKg: 50 },
+      { weightKg: 60, completed: false },
+      { weightKg: null },
     ]);
 
-    const records = await loadPersonalRecords();
-    expect(prValue(records, press.id, 'weight')).toBe(50); // the incomplete 60 kg set is not a performance
-    expect(prValue(records, press.id, 'reps')).toBe(12); // bodyweight set still counts for reps
-    expect(prValue(records, press.id, 'volume')).toBe(250);
-    expect(prValue(records, press.id, 'e1rm')).toBe(estimateOneRepMax(50, 5));
-    expect(metricValue('weight', null, 12)).toBeNull();
-    expect(metricValue('reps', 40, null)).toBeNull();
+    const pr = await getPRsForExercise(press.id);
+    expect(pr.current?.weightKg).toBe(50);
+    expect(pr.trophySetIds).toHaveLength(1);
+  });
+
+  it('picks a single trophy per workout day, earliest set on an internal tie', async () => {
+    const row = await createExercise('Barbell Row');
+    const ids = await logSession('2026-11-01', row.id, row.name, [
+      { weightKg: 70 },
+      { weightKg: 70 },
+      { weightKg: 60 },
+    ]);
+
+    expect(await trophies(row.id)).toEqual([ids[0]]);
+  });
+
+  it('gives one trophy per exercise per day across two sessions of the same day', async () => {
+    const squat = await createExercise('Squat');
+    const first = await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100 }], 0);
+    const second = await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 110 }], 1);
+
+    expect(await trophies(squat.id)).toEqual([second[0]]);
+    expect(first[0]).not.toBe(second[0]);
+  });
+
+  it('returns an empty view for an exercise with no qualifying set', async () => {
+    const curl = await createExercise('Curl');
+    const pr = await getPRsForExercise(curl.id);
+    expect(pr.current).toBeNull();
+    expect(pr.history).toEqual([]);
+    expect(pr.trophySetIds).toEqual([]);
   });
 });
 
-describe('PR recalculation after history changes', () => {
-  it('lowers the PR when the record set is edited down', async () => {
+describe('recalculation after history changes', () => {
+  it('promotes the previous best when the PR set is edited down', async () => {
     const squat = await createExercise('Squat');
-    await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100, reps: 5 }]);
-    const recordSets = await logSession('2026-11-05', squat.id, squat.name, [{ weightKg: 110, reps: 3 }]);
+    await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100 }]);
+    const top = await logSession('2026-11-05', squat.id, squat.name, [{ weightKg: 110 }]);
+    expect(await currentWeight(squat.id)).toBe(110);
 
-    expect(prValue(await loadPersonalRecords(), squat.id, 'weight')).toBe(110);
-
-    await updateSet(recordSets[0], { weightKg: 95 });
-    const records = await recalculatePersonalRecords();
-    expect(prValue(records, squat.id, 'weight')).toBe(100);
-    expect(records.find((row) => row.exerciseId === squat.id)?.metrics.weight?.setId).not.toBe(
-      recordSets[0],
-    );
+    await updateSet(top[0], { weightKg: 95 });
+    const pr = await getPRsForExercise(squat.id);
+    expect(pr.current?.weightKg).toBe(100);
+    expect(pr.trophySetIds).not.toContain(top[0]);
   });
 
-  it('restores the correct previous best after deleting the record set', async () => {
+  it('promotes the next best when the PR holder is deleted', async () => {
     const squat = await createExercise('Squat');
-    await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100, reps: 5 }]);
-    const midSets = await logSession('2026-11-03', squat.id, squat.name, [{ weightKg: 105, reps: 4 }]);
-    const topSets = await logSession('2026-11-06', squat.id, squat.name, [{ weightKg: 110, reps: 2 }]);
+    await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100 }]);
+    const mid = await logSession('2026-11-03', squat.id, squat.name, [{ weightKg: 105 }]);
+    const top = await logSession('2026-11-06', squat.id, squat.name, [{ weightKg: 110 }]);
 
-    expect(prValue(await loadPersonalRecords(), squat.id, 'weight')).toBe(110);
+    await deleteSet(top[0]);
+    expect(await currentWeight(squat.id)).toBe(105);
 
-    await deleteSet(topSets[0]);
-    expect(prValue(await loadPersonalRecords(), squat.id, 'weight')).toBe(105);
-
-    await deleteSet(midSets[0]);
-    const records = await loadPersonalRecords();
-    expect(prValue(records, squat.id, 'weight')).toBe(100);
-    expect(improvementCount(records, squat.id, 'weight')).toBe(1);
-    expect(await loadExercisePersonalRecords(squat.id)).toEqual(
-      records.find((row) => row.exerciseId === squat.id),
-    );
+    await deleteSet(mid[0]);
+    const pr = await getPRsForExercise(squat.id);
+    expect(pr.current?.weightKg).toBe(100);
+    expect(pr.history.map((set) => set.weightKg)).toEqual([100]);
   });
 
-  it('clears the PR when its only set is deleted and leaves nothing behind', async () => {
+  it('clears the PR when its only set is deleted', async () => {
     const curl = await createExercise('Curl');
-    const sets = await logSession('2026-11-02', curl.id, curl.name, [{ weightKg: 30, reps: 10 }]);
+    const sets = await logSession('2026-11-02', curl.id, curl.name, [{ weightKg: 30 }]);
 
     await deleteSet(sets[0]);
-    const records = await loadPersonalRecords();
-    expect(records.find((row) => row.exerciseId === curl.id)?.metrics.weight).toBeUndefined();
-    expect(await loadRecordHitsForDate('2026-11-02')).toEqual([]);
+    const pr = await getPRsForExercise(curl.id);
+    expect(pr.current).toBeNull();
+    expect(pr.trophySetIds).toEqual([]);
   });
 
-  it('reports PR moments for a session day only when they were real PRs', async () => {
-    const bench = await createExercise('Bench Press');
-    await logSession('2026-11-01', bench.id, bench.name, [{ weightKg: 80, reps: 5 }]);
-    await logSession('2026-11-08', bench.id, bench.name, [{ weightKg: 85, reps: 5 }]);
+  it('removes later trophies when an old set is edited higher', async () => {
+    const squat = await createExercise('Squat');
+    const first = await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100 }]);
+    const later = await logSession('2026-11-05', squat.id, squat.name, [{ weightKg: 105 }]);
 
-    const hits = await loadRecordHitsForDate('2026-11-08');
-    expect(hits.length).toBeGreaterThan(0);
-    expect(hits.every((entry) => entry.exerciseId === bench.id)).toBe(true);
-    expect(hits.find((entry) => entry.metric === 'weight')?.value).toBe(85);
-    expect(await loadRecordHitsForDate('2026-10-01')).toEqual([]);
+    expect(await trophies(squat.id)).toEqual([first[0], later[0]]);
+
+    // The old day becomes the best day overall; the later set no longer beats it.
+    await updateSet(first[0], { weightKg: 120 });
+    const pr = await getPRsForExercise(squat.id);
+    expect(pr.current?.weightKg).toBe(120);
+    expect(pr.trophySetIds).toEqual([first[0]]);
+  });
+
+  it('recalculates when a session moves to another date', async () => {
+    const squat = await createExercise('Squat');
+    await logSession('2026-11-01', squat.id, squat.name, [{ weightKg: 100 }]);
+    await logSession('2026-11-05', squat.id, squat.name, [{ weightKg: 105 }]);
+
+    const day = await db.workoutDays.where('date').equals('2026-11-05').first();
+    await db.workoutDays.update((day as { id: string }).id, { date: '2026-10-30' });
+
+    const pr = await getPRsForExercise(squat.id);
+    // 105 now happened first, so 100 on 2026-11-01 is no longer a PR day.
+    expect(pr.history.map((set) => [set.date, set.weightKg])).toEqual([['2026-10-30', 105]]);
+    expect(pr.current?.weightKg).toBe(105);
+  });
+
+  it('never leaves stale trophies behind after repeated edits', async () => {
+    const squat = await createExercise('Squat');
+    const sets = await logSession('2026-11-01', squat.id, squat.name, [
+      { weightKg: 90 },
+      { weightKg: 95 },
+    ]);
+
+    await updateSet(sets[1], { weightKg: 94 });
+    await updateSet(sets[0], { weightKg: 96 });
+    const pr = await getPRsForExercise(squat.id);
+    expect(pr.trophySetIds).toEqual([sets[0]]);
+    expect(pr.current?.weightKg).toBe(96);
   });
 });
 
-describe('PR engine edge cases', () => {
-  const base = (overrides: Partial<SetPerformance>): SetPerformance => ({
+describe('engine edge cases', () => {
+  const performance = (overrides: Partial<SetPerformance>): SetPerformance => ({
     setId: newId(),
     workoutExerciseId: 'session',
     workoutDayId: 'day',
@@ -289,36 +293,33 @@ describe('PR engine edge cases', () => {
   });
 
   it('orders history by date regardless of input order', () => {
-    const records = computePersonalRecords([
-      base({ date: '2026-11-05', weightKg: 110, reps: 2 }),
-      base({ date: '2026-11-01', weightKg: 100, reps: 5 }),
+    const pr = computeExercisePr('exercise', [
+      performance({ date: '2026-11-05', weightKg: 110 }),
+      performance({ date: '2026-11-01', weightKg: 100 }),
     ]);
-
-    expect(records).toHaveLength(1);
-    expect(records[0].metrics.weight?.value).toBe(110);
-    expect(records[0].improvements.filter((entry) => entry.metric === 'weight').map((entry) => entry.value)).toEqual([
-      100, 110,
-    ]);
-    expect(records[0].exerciseName).toBe('Squat');
+    expect(pr.history.map((set) => set.weightKg)).toEqual([100, 110]);
   });
 
-  it('keeps exercises apart even when set value is identical', () => {
-    const records = computePersonalRecords([
-      base({ exerciseId: 'a', exerciseName: 'Squat' }),
-      base({ exerciseId: 'b', exerciseName: 'Bench Press' }),
+  it('keeps exercises apart even at identical weights', () => {
+    const a = computeExercisePr('a', [performance({ exerciseId: 'a' })]);
+    const b = computeExercisePr('b', [performance({ exerciseId: 'b' })]);
+    expect(a.current?.weightKg).toBe(100);
+    expect(b.current?.weightKg).toBe(100);
+    expect(a.exerciseId).not.toBe(b.exerciseId);
+  });
+
+  it('rejects zero, negative and non-finite weights', () => {
+    const pr = computeExercisePr('exercise', [
+      performance({ setId: 'zero', weightKg: 0 }),
+      performance({ setId: 'negative', weightKg: -50 }),
+      performance({ setId: 'nan', weightKg: Number.NaN }),
+      performance({ setId: 'missing', weightKg: null }),
     ]);
-    expect(records.map((row) => row.exerciseId).sort()).toEqual(['a', 'b']);
+    expect(pr.current).toBeNull();
+    expect(pr.trophySetIds).toEqual([]);
   });
 
-  it('treats 0 and negative values as not recorded', () => {
-    expect(metricValue('weight', 0, 10)).toBeNull();
-    expect(metricValue('volume', -10, 5)).toBeNull();
-    expect(metricValue('e1rm', 100, 0)).toBeNull();
-    expect(metricValue('volume', 100, 10)).toBe(1000);
-  });
-
-  it('ignores rows with no exercise id and empty history', () => {
-    expect(computePersonalRecords([])).toEqual([]);
-    expect(computePersonalRecords([base({ exerciseId: '' })])).toEqual([]);
+  it('handles an empty history', () => {
+    expect(computeExercisePr('exercise', []).current).toBeNull();
   });
 });
