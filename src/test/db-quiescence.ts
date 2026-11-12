@@ -1,5 +1,4 @@
 import { act } from '@testing-library/react';
-import { vi } from 'vitest';
 
 /**
  * Test-only teardown support: wait for the app's database reads to finish
@@ -37,31 +36,65 @@ import { vi } from 'vitest';
 let readsInFlight = 0;
 
 /**
+ * Wrappers already installed, so a repeated `trackDatabaseReads` call cannot
+ * stack a second wrapper on top of the first and double-count reads.
+ */
+const WRAPPED = new WeakSet<(...args: never[]) => Promise<unknown>>();
+
+/**
  * Wrap the given read functions so they can be counted.
  *
- * `vi.spyOn` is used because a module namespace's properties are getter-only,
- * and the original is captured first because after spying the property *is* the
- * spy. Call `settleDatabaseReads` before `vi.restoreAllMocks()`, or the counter
- * stops being updated.
+ * The wrappers are plain functions installed with `Object.defineProperty`, not
+ * `vi.spyOn` mocks. That matters because a spy is registered in Vitest's mock
+ * restoration registry, and `vi.restoreAllMocks()` both reverts the spy and
+ * clears the registry. Since tracking is installed once at module load but
+ * `restoreAllMocks()` runs in every `afterEach`, a spy-based tracker is
+ * disarmed permanently after the first test: `settleDatabaseReads` then reads a
+ * counter that never moves while real reads are still in flight, and the next
+ * test's `db.delete()` closes the database underneath them.
+ *
+ * Assignment (`holder[name] = wrapper`) is not an option: ES module namespace
+ * exports are getter-only, so it throws in strict mode. `defineProperty` works
+ * because namespace properties are configurable.
  */
 export function trackDatabaseReads(
   target: object,
   names: readonly string[],
 ): void {
-  for (const name of names) {
-    const holder = target as Record<string, unknown>;
-    const real = holder[name] as (...args: never[]) => Promise<unknown>;
+  const holder = target as unknown as Record<string, (...args: never[]) => Promise<unknown>>;
 
-    vi.spyOn(holder as never, name as never).mockImplementation((async (
-      ...args: never[]
-    ) => {
+  for (const name of names) {
+    const current = holder[name];
+    if (typeof current !== 'function') {
+      throw new TypeError(`trackDatabaseReads: ${name} is not a function`);
+    }
+
+    /*
+     * Never wrap twice. Without this guard a second tracking call would build a
+     * wrapper around the first, double-counting every read.
+     */
+    if (WRAPPED.has(current)) continue;
+    const real = current;
+
+    const wrapper = async (...args: never[]): Promise<unknown> => {
       readsInFlight += 1;
       try {
         return await real.apply(holder, args);
       } finally {
         readsInFlight -= 1;
       }
-    }) as never);
+    };
+
+    // Tagged so the guard above can recognise it, and so nothing treats the
+    // wrapper as a mock.
+    WRAPPED.add(wrapper);
+
+    Object.defineProperty(holder, name, {
+      value: wrapper,
+      configurable: true,
+      writable: true,
+      enumerable: true,
+    });
   }
 }
 

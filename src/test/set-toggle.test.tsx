@@ -86,6 +86,17 @@ async function storedSet(setNumber: number) {
 const dataLayer = await import('../db/workout');
 
 /**
+ * The genuine `loadDay`, captured *before* the tracking wrapper is installed.
+ *
+ * Vitest 4 returns the existing mock from a second `spyOn` on the same property
+ * rather than layering a new one, so a test that read `dataLayer.loadDay` after
+ * tracking would capture the tracker itself and recurse when it "called the
+ * real implementation". Keeping the original here lets a test invoke the true
+ * function while the tracker still counts the call for teardown.
+ */
+const genuineLoadDay = dataLayer.loadDay;
+
+/**
  * Wrap the reads `WorkoutScreen` issues, so teardown can wait for them.
  * The helper explains the two teardown errors this prevents.
  */
@@ -112,7 +123,7 @@ describe('A. completing without blurring the weight', () => {
     const writes: unknown[] = [];
     let refreshes = 0;
     const realUpdateSet = dataLayer.updateSet;
-    const realLoadDay = dataLayer.loadDay;
+    const realLoadDay = genuineLoadDay;
     const writeSpy = vi.spyOn(dataLayer, 'updateSet').mockImplementation(async (id, patch) => {
       writes.push(patch);
       return realUpdateSet(id, patch);
