@@ -7,7 +7,12 @@
  * makes stale records structurally impossible.
  */
 import { db } from './db';
-import { computeExercisePr, type ExercisePR, type SetPerformance } from '../lib/pr';
+import {
+  computeExercisePr,
+  computeRecordAchievements,
+  type ExercisePR,
+  type SetPerformance,
+} from '../lib/pr';
 
 const EMPTY_PR = (exerciseId: string): ExercisePR => ({
   exerciseId,
@@ -64,13 +69,23 @@ export async function loadExercisePerformance(exerciseId: string): Promise<SetPe
 }
 
 /**
- * The PR view for one exercise: current PR, the PR-setting sets in order, and
- * their ids for marking rows. Always resolves -- an exercise with no qualifying
- * set yields `current: null` and empty lists -- so callers never branch on
- * `undefined`, and there is no state to go stale after an edit or delete.
+ * The PR view for one exercise: current PR, the PR-setting sets in order, their
+ * ids for marking rows, and (Phase 6A) every record achievement by set id.
+ * Always resolves -- an exercise with no qualifying set yields `current: null`
+ * and empty lists -- so callers never branch on `undefined`, and there is no
+ * state to go stale after an edit or delete.
+ *
+ * The achievements are derived from the same in-memory `history` the weight
+ * engine just read, so this adds one linear pass and **no extra query**. Only
+ * `workoutSets` and its parents are read; `plannedDays` is never touched, so a
+ * planned day can never influence a record.
  */
 export async function getPRsForExercise(exerciseId: string): Promise<ExercisePR> {
   const history = await loadExercisePerformance(exerciseId);
   if (history.length === 0) return EMPTY_PR(exerciseId);
-  return computeExercisePr(exerciseId, history);
+
+  return {
+    ...computeExercisePr(exerciseId, history),
+    achievements: computeRecordAchievements(history),
+  };
 }

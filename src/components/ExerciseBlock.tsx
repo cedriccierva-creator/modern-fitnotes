@@ -5,6 +5,7 @@ import { formatWeight } from '../lib/units';
 import type { IntensityId } from '../lib/intensity';
 import type { SessionExercise } from '../db/workout';
 import type { TogglePatch } from './SetRow';
+import { setRecords } from '../lib/pr';
 import type { ExercisePR } from '../lib/pr';
 
 interface Props {
@@ -60,6 +61,15 @@ export default function ExerciseBlock({
   // it reads. Re-derived on every render, so a unit switch needs no new query.
   const currentPr = pr?.current ?? null;
   const trophySetIds = pr?.trophySetIds ?? [];
+  const achievements = pr?.achievements;
+  // Only the session that holds the volume record displays it; a second block
+  // for the same exercise on another day stays clean.
+  const volumeRecordHere =
+    achievements?.volume !== undefined &&
+    achievements.volume !== null &&
+    achievements.volume.workoutExerciseId === session.id
+      ? achievements.volume
+      : null;
 
   function commit(): void {
     if (draft.trim() !== '' && draft.trim() !== session.exerciseName) onRename(draft.trim());
@@ -122,6 +132,21 @@ export default function ExerciseBlock({
               </span>
             </p>
           )}
+          {/*
+            Session-volume record. It belongs to the session, not to any one set,
+            so it is shown here and never attached to a set row. Only the session
+            that actually holds the record shows it.
+          */}
+          {volumeRecordHere === null ? null : (
+            <p className="mt-0.5 text-[11px] font-semibold text-teal-300">
+              <span aria-label="Best session volume record" role="img">
+                <span aria-hidden="true">◆ </span>
+              </span>
+              <span aria-live="polite">
+                Best volume {formatWeight(volumeRecordHere.volumeKg, unit)} {unit}
+              </span>
+            </p>
+          )}
         </div>
 
         <button
@@ -149,6 +174,7 @@ export default function ExerciseBlock({
             set={set}
             unit={unit}
             isPr={trophySetIds.includes(set.id)}
+            records={achievements === undefined ? undefined : setRecords(achievements, set.id)}
             onChange={(patch) => onChangeSet(set.id, patch)}
             onToggle={(patch) => onToggleSet(set.id, patch)}
             onDelete={() => onDeleteSet(set.id)}
