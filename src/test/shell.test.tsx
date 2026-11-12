@@ -28,7 +28,7 @@ describe('shell', () => {
   it('renders the calendar screen', async () => {
     render(<App />);
     expect(screen.getByText('FitNotes')).toBeTruthy();
-    expect(screen.getByText(/plan the/i)).toBeTruthy();
+    expect(screen.getByText(/plan your/i)).toBeTruthy();
   });
 
   it('renders on a dark slate root', async () => {

@@ -4,6 +4,7 @@ import { db } from '../db/db';
 import {
   applyPreset,
   clearPreset,
+  isLoggedDate,
   loadPlannedDays,
   removePlannedDay,
   setPlannedTemplate,
@@ -130,5 +131,159 @@ describe('editing plans', () => {
 
     await clearPreset('ppl-flow', WEEK);
     expect(await loadPlannedDays()).toEqual([]);
+  });
+});
+
+/**
+ * The planner is day-scoped: every write here targets exactly one local
+ * calendar day, so a skipped day can never shift, reschedule or "overdue"
+ * another. These tests pin that down directly, without any UI involved.
+ */
+describe('independent day assignment', () => {
+  it('assigns one empty date and leaves the rest of the week empty', async () => {
+    await setPlannedTemplate('2026-11-12', 'custom', 'arms');
+
+    const rows = await loadPlannedDays();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      date: '2026-11-12',
+      presetId: 'custom',
+      category: 'arms',
+      label: 'Arms',
+    });
+  });
+
+  it('persists an arbitrary day-by-day pattern, empty Wednesday included', async () => {
+    // Mon push, Tue legs, Wed rest, Thu upper, Fri pull. No routine, no spread.
+    await setPlannedTemplate('2026-11-09', 'custom', 'push');
+    await setPlannedTemplate('2026-11-10', 'custom', 'legs');
+    await setPlannedTemplate('2026-11-12', 'custom', 'upper');
+    await setPlannedTemplate('2026-11-13', 'custom', 'pull');
+
+    const rows = (await loadPlannedDays()).sort((a, b) => a.date.localeCompare(b.date));
+    expect(rows.map((row) => [row.date, row.category])).toEqual([
+      ['2026-11-09', 'push'],
+      ['2026-11-10', 'legs'],
+      ['2026-11-12', 'upper'],
+      ['2026-11-13', 'pull'],
+    ]);
+    expect(rows.some((row) => row.date === '2026-11-11')).toBe(false);
+  });
+
+  it('never writes a sibling date when one date changes', async () => {
+    await setPlannedTemplate('2026-11-09', 'custom', 'push');
+    await setPlannedTemplate('2026-11-10', 'custom', 'pull');
+    const before = await loadPlannedDays();
+
+    await setPlannedTemplate('2026-11-09', 'custom', 'arms');
+
+    const after = await loadPlannedDays();
+    expect(after).toHaveLength(2);
+    expect(after.find((row) => row.date === '2026-11-10')).toEqual(
+      before.find((row) => row.date === '2026-11-10'),
+    );
+  });
+
+  it('repeats the same template on different dates as separate rows', async () => {
+    await setPlannedTemplate('2026-11-09', 'full-body-3', 'fullBody');
+    await setPlannedTemplate('2026-11-12', 'full-body-3', 'fullBody');
+
+    const rows = (await loadPlannedDays()).sort((a, b) => a.date.localeCompare(b.date));
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.date)).toEqual(['2026-11-09', '2026-11-12']);
+    expect(new Set(rows.map((row) => row.id)).size).toBe(2);
+    expect(rows.every((row) => row.category === 'fullBody')).toBe(true);
+  });
+
+  it('changes a date in place without a duplicate row and keeps createdAt', async () => {
+    await setPlannedTemplate('2026-11-11', 'custom', 'push');
+    const before = (await loadPlannedDays())[0];
+
+    await setPlannedTemplate('2026-11-11', 'custom', 'arms');
+
+    const after = await loadPlannedDays();
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ category: 'arms', label: 'Arms', createdAt: before.createdAt });
+    expect(after[0].id).toBe(before.id);
+  });
+
+  it('removes the plan for one date and leaves every other date alone', async () => {
+    await applyPreset('ppl-flow', WEEK);
+    const before = await loadPlannedDays();
+    const removed = before.find((row) => row.date === '2026-11-11')!;
+
+    await removePlannedDay('2026-11-11');
+
+    const after = await loadPlannedDays();
+    expect(after).toHaveLength(4);
+    expect(after.some((row) => row.date === '2026-11-11')).toBe(false);
+    for (const row of before.filter((entry) => entry.date !== removed.date)) {
+      expect(after.find((entry) => entry.date === row.date)).toEqual(row);
+    }
+  });
+
+  it('removing a skipped day does not shift later plans forward', async () => {
+    await setPlannedTemplate('2026-11-09', 'custom', 'push');
+    await setPlannedTemplate('2026-11-10', 'custom', 'pull');
+    await setPlannedTemplate('2026-11-11', 'custom', 'legs');
+
+    // "Skip" Wednesday by deleting it: nothing may move into Tuesday or Thursday.
+    await removePlannedDay('2026-11-11');
+
+    const rows = (await loadPlannedDays()).sort((a, b) => a.date.localeCompare(b.date));
+    expect(rows.map((row) => [row.date, row.category])).toEqual([
+      ['2026-11-09', 'push'],
+      ['2026-11-10', 'pull'],
+    ]);
+    expect(rows.some((row) => row.date === '2026-11-12')).toBe(false);
+  });
+});
+
+describe('planning never touches a logged workout', () => {
+  it('assigns onto an already-logged date and leaves the log byte-identical', async () => {
+    const { day, row, set } = await logDay('2026-11-10');
+
+    await setPlannedTemplate('2026-11-10', 'custom', 'arms');
+
+    expect(await db.workoutDays.get(day.id)).toEqual(day);
+    expect(await db.workoutExercises.get(row.id)).toEqual(row);
+    expect(await db.workoutSets.get(set.id)).toEqual(set);
+
+    const planned = await loadPlannedDays();
+    expect(planned).toHaveLength(1);
+    expect(planned[0]).toMatchObject({ date: '2026-11-10', category: 'arms' });
+  });
+
+  it('removes a plan from a logged date and leaves the log alone', async () => {
+    const { day, row, set } = await logDay('2026-11-10');
+    await setPlannedTemplate('2026-11-10', 'custom', 'push');
+
+    await removePlannedDay('2026-11-10');
+
+    expect(await loadPlannedDays()).toEqual([]);
+    expect(await db.workoutDays.get(day.id)).toEqual(day);
+    expect(await db.workoutExercises.get(row.id)).toEqual(row);
+    expect(await db.workoutSets.get(set.id)).toEqual(set);
+  });
+
+  it('reports whether a single date is logged', async () => {
+    expect(await isLoggedDate('2026-11-10')).toBe(false);
+
+    await logDay('2026-11-10');
+
+    expect(await isLoggedDate('2026-11-10')).toBe(true);
+    expect(await isLoggedDate('2026-11-11')).toBe(false);
+  });
+});
+
+describe('arms category', () => {
+  it('persists arms with its label and reads back after a fresh query', async () => {
+    await setPlannedTemplate('2026-11-11', 'custom', 'arms');
+
+    const rows = await loadPlannedDays();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].category).toBe('arms');
+    expect(rows[0].label).toBe('Arms');
+    expect(typeof rows[0].id).toBe('string');
   });
 });

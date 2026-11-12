@@ -9,6 +9,8 @@ interface Props {
   selected: string;
   today: string;
   planned: ReadonlyMap<string, PlannedDay>;
+  /** Dates holding a logged workout. Rendered independently of any plan. */
+  logged?: ReadonlySet<string>;
   onSelect: (date: string) => void;
   onNavigate: (delta: number) => void;
 }
@@ -22,6 +24,7 @@ export default function MonthCalendar({
   selected,
   today,
   planned,
+  logged,
   onSelect,
   onNavigate,
 }: Props) {
@@ -66,6 +69,7 @@ export default function MonthCalendar({
         {cells.map((date) => {
           const outside = !isSameMonth(date, year, month);
           const plan = planned.get(date);
+          const isLogged = logged?.has(date) ?? false;
           const isSelected = date === selected;
           const isToday = date === today;
 
@@ -75,9 +79,11 @@ export default function MonthCalendar({
               type="button"
               aria-label={formatDateLabel(date)}
               aria-pressed={isSelected}
+              data-logged={isLogged ? 'true' : undefined}
+              data-planned={plan ? 'true' : undefined}
               onClick={() => onSelect(date)}
               className={[
-                'flex h-11 flex-col items-center justify-start rounded-lg px-0.5 pt-1 transition-colors',
+                'relative flex h-11 flex-col items-center justify-start rounded-lg px-0.5 pt-1 transition-colors',
                 outside ? 'text-slate-600' : 'text-slate-300',
                 isSelected
                   ? 'bg-emerald-500/20 ring-1 ring-inset ring-emerald-400'
@@ -86,6 +92,12 @@ export default function MonthCalendar({
                     : 'hover:bg-slate-800',
               ].join(' ')}
             >
+              {isLogged ? (
+                <span
+                  aria-hidden="true"
+                  className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-emerald-400"
+                />
+              ) : null}
               <span className={`text-xs ${isToday ? 'font-bold text-emerald-300' : ''}`}>
                 {Number(date.slice(8))}
               </span>

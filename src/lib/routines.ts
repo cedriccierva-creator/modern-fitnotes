@@ -26,8 +26,26 @@ export const CATEGORY_LABELS: Record<WorkoutCategory, string> = {
   legs: 'Legs',
   upper: 'Upper',
   lower: 'Lower',
+  arms: 'Arms',
   fullBody: 'Full Body',
 };
+
+/**
+ * Every category, in picker order.
+ *
+ * This is the list the planner offers for a category-only assignment. Routine
+ * presets are a separate, optional layer on top of it: a preset never has to be
+ * used for a day to have a category.
+ */
+export const ALL_CATEGORIES: readonly WorkoutCategory[] = [
+  'push',
+  'pull',
+  'legs',
+  'upper',
+  'lower',
+  'arms',
+  'fullBody',
+];
 
 /**
  * Indexes spread evenly across `total` slots. Full Body ×3 therefore lands on

@@ -190,5 +190,6 @@ export const CATEGORY_ORDER: readonly WorkoutCategory[] = [
   'legs',
   'upper',
   'lower',
+  'arms',
   'fullBody',
 ];

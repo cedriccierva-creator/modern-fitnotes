@@ -23,6 +23,7 @@ function setup() {
       selected="2026-11-10"
       today="2026-11-10"
       planned={new Map([['2026-11-12', planFor('2026-11-12')]])}
+      logged={new Set(['2026-11-13'])}
       onSelect={onSelect}
       onNavigate={onNavigate}
     />,
@@ -67,5 +68,55 @@ describe('month calendar', () => {
     const planned = screen.getByRole('button', { name: 'Thursday, November 12, 2026' });
     expect(planned.textContent).toContain('Push');
     expect(planned.getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
+describe('logged indicator', () => {
+  it('marks a logged day without a plan', () => {
+    setup();
+
+    const logged = screen.getByRole('button', { name: 'Friday, November 13, 2026' });
+    expect(logged.getAttribute('data-logged')).toBe('true');
+    expect(logged.getAttribute('data-planned')).toBeNull();
+  });
+
+  it('keeps planned and logged as independent signals on the same day', () => {
+    render(
+      <MonthCalendar
+        year={2026}
+        month={11}
+        selected="2026-11-12"
+        today="2026-11-10"
+        planned={new Map([['2026-11-12', planFor('2026-11-12')]])}
+        logged={new Set(['2026-11-12'])}
+        onSelect={() => {}}
+        onNavigate={() => {}}
+      />,
+    );
+
+    const both = screen.getByRole('button', { name: 'Thursday, November 12, 2026' });
+    expect(both.getAttribute('data-planned')).toBe('true');
+    expect(both.getAttribute('data-logged')).toBe('true');
+    expect(both.textContent).toContain('Push');
+
+    // The selected/today styling is untouched by either indicator.
+    expect(both.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('renders no indicator when the logged set is omitted', () => {
+    render(
+      <MonthCalendar
+        year={2026}
+        month={11}
+        selected="2026-11-10"
+        today="2026-11-10"
+        planned={new Map()}
+        onSelect={() => {}}
+        onNavigate={() => {}}
+      />,
+    );
+
+    const cell = screen.getByRole('button', { name: 'Friday, November 13, 2026' });
+    expect(cell.getAttribute('data-logged')).toBeNull();
   });
 });

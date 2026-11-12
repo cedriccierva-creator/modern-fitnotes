@@ -14,7 +14,14 @@
  */
 
 /** The training focus of a day. Doubles as the routine-preset building block. */
-export type WorkoutCategory = 'push' | 'pull' | 'legs' | 'upper' | 'lower' | 'fullBody';
+export type WorkoutCategory =
+  | 'push'
+  | 'pull'
+  | 'legs'
+  | 'upper'
+  | 'lower'
+  | 'arms'
+  | 'fullBody';
 
 /** The unit the user prefers to *see*. Storage is always kg. */
 export type WeightUnit = 'kg' | 'lb';

@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ALL_CATEGORIES,
   CATEGORY_LABELS,
   ROUTINE_PRESETS,
   evenSpread,
   findPreset,
   planWeek,
 } from '../lib/routines';
+import { CATEGORY_CHIP } from '../lib/categoryStyles';
+import { CATEGORY_ORDER } from '../db/workout';
 
 const WEEK = '2026-11-09';
 
@@ -73,5 +76,32 @@ describe('planWeek', () => {
       '2026-11-13', '2026-11-14', '2026-11-15',
     ]);
     expect(planWeek(findPreset('ulul')!, WEEK, all)).toEqual([]);
+  });
+});
+
+describe('categories', () => {
+  it('offers every stored category, arms included', () => {
+    expect(ALL_CATEGORIES).toContain('arms');
+    expect(CATEGORY_LABELS.arms).toBe('Arms');
+    expect(new Set(ALL_CATEGORIES).size).toBe(ALL_CATEGORIES.length);
+  });
+
+  it('keeps labels, chip styles and the persisted order exhaustive and in step', () => {
+    // A new member of the WorkoutCategory union must be added to all three maps.
+    expect([...ALL_CATEGORIES].sort()).toEqual([...CATEGORY_ORDER].sort());
+    for (const category of ALL_CATEGORIES) {
+      expect(CATEGORY_LABELS[category]).toBeTruthy();
+      expect(CATEGORY_CHIP[category]).toBeTruthy();
+    }
+  });
+
+  it('leaves the four routine presets untouched by the arms addition', () => {
+    // Routines stay optional templates; adding a category must not invent one.
+    expect(ROUTINE_PRESETS.map((preset) => preset.id)).toEqual([
+      'ppl-flow', 'ulul', 'pplppl', 'full-body-3',
+    ]);
+    for (const preset of ROUTINE_PRESETS) {
+      expect(preset.templates).not.toContain('arms');
+    }
   });
 });

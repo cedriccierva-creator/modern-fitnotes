@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
+import DayPlanPanel from '../components/DayPlanPanel';
 import MonthCalendar from '../components/MonthCalendar';
+import ProgramPicker from '../components/ProgramPicker';
 import WeekPlanner from '../components/WeekPlanner';
 import {
-  applyPreset,
-  clearPreset,
+  isLoggedDate,
   loadLoggedDates,
   loadPlannedDays,
   removePlannedDay,
@@ -13,9 +14,13 @@ import { monthGrid, todayKey, weekStart } from '../lib/month';
 import type { PlannedDay, WorkoutCategory } from '../types';
 
 /**
- * Phase 3 screen: month calendar plus the weekly routine planner. The calendar
- * is local state; everything persistent lives in the plannedDays table, which
- * is re-read after each write.
+ * Calendar screen: the month grid, the selected day's plan, and a read-mostly
+ * week overview.
+ *
+ * Planning is day-scoped throughout. Nothing here fills a week, repeats a
+ * routine, or moves a skipped day: every write targets exactly one date via
+ * `setPlannedTemplate`, and only the `plannedDays` table is written. Opening a
+ * workout (`onOpenDay`) is a separate, explicit action.
  */
 export default function CalendarScreen({
   selected,
@@ -33,6 +38,8 @@ export default function CalendarScreen({
   }));
   const [planned, setPlanned] = useState<readonly PlannedDay[]>([]);
   const [logged, setLogged] = useState<ReadonlySet<string>>(new Set());
+  /** The date whose program picker is open, if any. At most one at a time. */
+  const [picking, setPicking] = useState<string | null>(null);
 
   const visibleDates = useMemo(() => monthGrid(cursor.year, cursor.month), [cursor]);
 
@@ -64,8 +71,32 @@ export default function CalendarScreen({
 
   const week = weekStart(selected);
 
-  async function change(date: string, category: WorkoutCategory): Promise<void> {
-    await setPlannedTemplate(date, plannedByDate.get(date)?.presetId ?? 'custom', category);
+  /**
+   * True when `date` already holds a logged workout. The document lookup is
+   * authoritative here (the `logged` set only covers the visible month), and it
+   * is a read: the log itself is never written by any planning action.
+   */
+  async function warnIfLogged(date: string): Promise<void> {
+    const alreadyLogged = await isLoggedDate(date);
+    if (!alreadyLogged) return;
+
+    // A warning, not a block: the assignment proceeds and the log is untouched.
+    window.alert(
+      'This day already has a logged workout. The plan will be saved, and your logged workout will not be changed.',
+    );
+  }
+
+  async function applyPlan(date: string, presetId: string, category: WorkoutCategory): Promise<void> {
+    await warnIfLogged(date);
+    await setPlannedTemplate(date, presetId, category);
+    setPicking(null);
+    refresh();
+  }
+
+  async function removePlan(date: string): Promise<void> {
+    await warnIfLogged(date);
+    await removePlannedDay(date);
+    setPicking(null);
     refresh();
   }
 
@@ -76,7 +107,7 @@ export default function CalendarScreen({
           Phase 4 · Calendar
         </p>
         <h1 className="text-2xl font-bold leading-tight text-slate-50">
-          Plan the <span className="text-emerald-400">week</span>.
+          Plan your <span className="text-emerald-400">days</span>.
         </h1>
       </div>
 
@@ -86,6 +117,7 @@ export default function CalendarScreen({
         selected={selected}
         today={today}
         planned={visiblePlanned}
+        logged={logged}
         onSelect={onSelect}
         onNavigate={navigate}
       />
@@ -98,14 +130,28 @@ export default function CalendarScreen({
         Open workout
       </button>
 
+      <DayPlanPanel
+        date={selected}
+        plan={plannedByDate.get(selected)}
+        isLogged={logged.has(selected)}
+        onOpenPicker={setPicking}
+        onRemove={(date) => void removePlan(date)}
+      />
+
+      {picking === null ? null : (
+        <ProgramPicker
+          date={picking}
+          onPick={(presetId, category) => void applyPlan(picking, presetId, category)}
+          onClose={() => setPicking(null)}
+        />
+      )}
+
       <WeekPlanner
         weekStartKey={week}
         planned={plannedByDate}
         logged={logged}
-        onApply={(presetId) => void applyPreset(presetId, week).then(refresh)}
-        onClear={(presetId) => void clearPreset(presetId, week).then(refresh)}
-        onChange={(date, category) => void change(date, category)}
-        onRemove={(date) => void removePlannedDay(date).then(refresh)}
+        onAssign={setPicking}
+        onRemove={(date) => void removePlan(date)}
       />
     </div>
   );

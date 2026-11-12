@@ -20,10 +20,13 @@ stops for review. `src/db/README.md` tracks where the persistence layer lands.
 
 ## Current state
 
-Phase 3 — interactive monthly calendar (Monday-first, 6-row grid) and the routine
-planner: PPLUL, ULUL, PPLPPL and Full Body ×3, applied to the current Monday-first
-week. Presets only ever fill days without a logged workout, and re-applying is
-idempotent.
+Phase 3 — interactive monthly calendar (Monday-first, 6-row grid) with day-by-day
+planning. Every date is independent: assign, change or remove a plan for one day
+at a time, or leave it as rest. Routine templates (PPLUL, ULUL, PPLPPL, Full Body
+×3) are optional and always apply to a *single* day — nothing fills a week, no
+routine recurs, and skipping a planned day never shifts or creates an overdue
+workout. Assigning a plan creates only a plan; logging starts when the workout is
+opened.
 
 Phase 4 adds exercise management and logging: an exercise library with rename,
 delete and reorder, three intensity presets that generate editable set rows, and
@@ -42,3 +45,14 @@ picker keeps two actions separate — *Add to today* logs a suggestion without
 adopting it, *Add to library* adopts it for future use. Adoption is idempotent
 and recorded as `Exercise.catalogId`; there are no deletion tombstones, so a
 deleted entry simply becomes a suggestion again.
+
+## Planning vs logging
+
+`plannedDays` and `workoutDays` are separate tables, and planning code only ever
+writes to the former. A planned day is an intention — at most one per date, held
+by a `&date` unique index — with no week, cycle or recurrence in the data. That
+is why a skipped day cannot move: there is nothing for it to move within.
+
+Planning an already-logged date warns first and then proceeds; the logged
+workout is never modified. The plan for a day is never read when logging, so an
+intensity and its sets are always chosen explicitly.
