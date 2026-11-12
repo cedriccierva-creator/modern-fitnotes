@@ -587,8 +587,20 @@ export interface VolumeAchievement {
 export interface RecordAchievements {
   /** Record types per set id, in a stable display order. */
   bySetId: ReadonlyMap<string, SetRecord[]>;
+  /**
+   * The records each set still *holds*, as opposed to merely established once.
+   *
+   * A set appears here only while it is the all-time best for that metric. This
+   * is what lets a badge say "this was a record then" while a separate marker
+   * says "this is the record now", without the two ever contradicting.
+   */
+  currentBySetId: ReadonlyMap<string, SetRecord[]>;
   /** The heaviest-weight record holder, or `null`. */
   weight: { setId: string; weightKg: number } | null;
+  /** The best estimated-1RM holder, or `null` when no set can be estimated. */
+  estimatedOneRepMax: EstimatedOneRepMax | null;
+  /** The highest-rep holder, or `null`. The one record bodyweight can hold. */
+  maxReps: RepsRecord | null;
   /** The highest session volume, which no single set owns. */
   volume: VolumeAchievement | null;
   /** Every set that established at least one record. */
@@ -651,6 +663,8 @@ export function computeRecordAchievements(
   history: readonly SetPerformance[],
 ): RecordAchievements {
   const bySetId = new Map<string, SetRecord[]>();
+  /** Mirror of `bySetId`, holding only the records each set still holds. */
+  const holders = new Map<string, SetRecord[]>();
   const ordered = [...history].sort(comparePrOrder);
 
   let bestWeight: number | null = null;
@@ -659,6 +673,20 @@ export function computeRecordAchievements(
   let bestReps: number | null = null;
 
   const bestByReps = new Map<number, number>();
+
+  /**
+   * Move a record to its new holder: exactly one set holds a given record at a
+   * time, so the previous holder loses the claim while keeping its history.
+   */
+  function claim(setId: string, record: SetRecord): void {
+    for (const held of holders.values()) {
+      const index = held.indexOf(record);
+      if (index !== -1) held.splice(index, 1);
+    }
+    const held = holders.get(setId);
+    if (held === undefined) holders.set(setId, [record]);
+    else held.push(record);
+  }
 
   for (const set of ordered) {
     if (!isEligible(set)) continue;
@@ -673,6 +701,7 @@ export function computeRecordAchievements(
         bestWeight = weight;
         weightHolder = { setId: set.setId, weightKg: weight };
         earned.push('weight');
+        claim(set.setId, 'weight');
       }
     }
 
@@ -681,7 +710,9 @@ export function computeRecordAchievements(
       const previous = bestByReps.get(reps);
       if (previous === undefined || isImprovement(weight, previous)) {
         bestByReps.set(reps, weight);
-        earned.push(REP_RANGE_RECORDS[reps - REP_RANGE_MIN]);
+        const record = REP_RANGE_RECORDS[reps - REP_RANGE_MIN];
+        earned.push(record);
+        claim(set.setId, record);
       }
     }
 
@@ -692,6 +723,7 @@ export function computeRecordAchievements(
       if (bestEstimate === null || isImprovement(estimate, bestEstimate)) {
         bestEstimate = estimate;
         earned.push('estimatedOneRepMax');
+        claim(set.setId, 'estimatedOneRepMax');
       }
     }
 
@@ -699,6 +731,7 @@ export function computeRecordAchievements(
     if (reps !== null && (bestReps === null || reps > bestReps)) {
       bestReps = reps;
       earned.push('maxReps');
+      claim(set.setId, 'maxReps');
     }
 
     if (earned.length > 0) bySetId.set(set.setId, sortRecords(earned));
@@ -707,13 +740,26 @@ export function computeRecordAchievements(
   // E. Session volume: belongs to the session, so it is never attached to a set.
   const volume = bestSessionVolume(history);
 
+  // Current holders for the metrics with no set-level badge of their own, so the
+  // exercise header can show them without a second pass over history.
+  const estimateHolder = bestEstimatedOneRepMax(history);
+  const repsHolder = bestMaxReps(history);
+
   const labels = Object.fromEntries(
     RECORD_ORDER.map((record) => [record, recordLabel(record)]),
   ) as Record<SetRecord, string>;
 
+  const currentBySetId = new Map<string, SetRecord[]>();
+  for (const [setId, held] of holders) {
+    if (held.length > 0) currentBySetId.set(setId, sortRecords(held));
+  }
+
   return {
     bySetId,
+    currentBySetId,
     weight: weightHolder,
+    estimatedOneRepMax: estimateHolder,
+    maxReps: repsHolder,
     volume:
       volume === null
         ? null

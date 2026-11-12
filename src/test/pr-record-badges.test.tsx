@@ -101,7 +101,15 @@ function makePr({
   achievements = undefined,
 }: {
   current?: { setId: string; weightKg: number } | null;
-  achievements?: { volumeWorkoutExerciseId?: string; volumeKg?: number };
+  achievements?: {
+    volumeWorkoutExerciseId?: string;
+    volumeKg?: number;
+    /** Current holders, so the emphasis and the summary can be exercised. */
+    current?: Record<string, SetRecord[]>;
+    weightKg?: number;
+    estimatedKg?: number;
+    maxReps?: number;
+  };
 } = {}): ExercisePR {
   const hasAchievements = achievements !== undefined;
   return {
@@ -124,7 +132,36 @@ function makePr({
     achievements: hasAchievements
       ? {
           bySetId: new Map<string, SetRecord[]>(),
-          weight: null,
+          currentBySetId: new Map(Object.entries(achievements.current ?? {})),
+          weight:
+            achievements.weightKg === undefined
+              ? null
+              : { setId: 'session-1', weightKg: achievements.weightKg },
+          estimatedOneRepMax:
+            achievements.estimatedKg === undefined
+              ? null
+              : {
+                  setId: 'session-1',
+                  workoutExerciseId: 'session-1',
+                  workoutDayId: 'day-1',
+                  date: DATE,
+                  setNumber: 1,
+                  weightKg: 100,
+                  reps: 5,
+                  estimatedKg: achievements.estimatedKg,
+                },
+          maxReps:
+            achievements.maxReps === undefined
+              ? null
+              : {
+                  setId: 'session-1',
+                  workoutExerciseId: 'session-1',
+                  workoutDayId: 'day-1',
+                  date: DATE,
+                  setNumber: 1,
+                  reps: achievements.maxReps,
+                  weightKg: 100,
+                },
           volume:
             achievements.volumeWorkoutExerciseId === undefined
               ? null
@@ -167,13 +204,36 @@ describe('record badges on a set', () => {
     renderBlock({
       sets: [baseSet({ id: 'hero', setNumber: 1 })],
       records: { hero: ['weight', 'estimatedOneRepMax', 'rm1'] },
-      pr: { current: { setId: 'hero', weightKg: 150 }, achievements: {} },
+      pr: {
+        current: { setId: 'hero', weightKg: 150 },
+        // All three records are still this set's, so all three read "current".
+        achievements: { current: { hero: ['weight', 'estimatedOneRepMax', 'rm1'] } },
+      },
     });
 
     const marks = badges(1);
-    expect(marks[0].getAttribute('aria-label')).toBe('Heaviest weight record');
-    expect(marks[1].getAttribute('aria-label')).toBe('Estimated 1RM record');
-    expect(marks[2].getAttribute('aria-label')).toBe('1RM record');
+    expect(marks[0].getAttribute('aria-label')).toBe('Heaviest weight record, current best');
+    expect(marks[1].getAttribute('aria-label')).toBe('Estimated 1RM record, current best');
+    expect(marks[2].getAttribute('aria-label')).toBe('1RM record, current best');
+  });
+
+  it('marks a surpassed record as historical without removing it', () => {
+    // The set established all three records, but only 1RM is still its own.
+    renderBlock({
+      sets: [baseSet({ id: 'hero', setNumber: 1 })],
+      records: { hero: ['weight', 'estimatedOneRepMax', 'rm1'] },
+      pr: {
+        current: { setId: 'hero', weightKg: 150 },
+        achievements: { current: { hero: ['rm1'] } },
+      },
+    });
+
+    const marks = badges(1);
+    // The badge is still rendered: history is never rewritten.
+    expect(marks).toHaveLength(3);
+    expect(marks[0].getAttribute('aria-label')).toBe('Heaviest weight record, since surpassed');
+    expect(marks[1].getAttribute('aria-label')).toBe('Estimated 1RM record, since surpassed');
+    expect(marks[2].getAttribute('aria-label')).toBe('1RM record, current best');
   });
 
   it('puts the badges on the exact set that earned them', () => {
@@ -275,6 +335,24 @@ describe('session volume indicator', () => {
   });
 });
 
+/**
+ * A `SessionExercise` for a real database session id, with no sets. The block
+ * only reads `session.id`, `exerciseName` and `sets` for display; the sets and
+ * records come from the database read, so nothing about the records is faked.
+ */
+function blockSession(exerciseName: string, sessionId: string): SessionExercise {
+  return {
+    id: sessionId,
+    workoutDayId: 'day-from-db',
+    exerciseId: 'exercise-from-db',
+    exerciseName,
+    order: 0,
+    createdAt: 0,
+    updatedAt: 0,
+    sets: [],
+  };
+}
+
 describe('end to end through the database', () => {
   afterEach(async () => {
     cleanup();
@@ -351,6 +429,44 @@ describe('end to end through the database', () => {
     expect(after.achievements!.weight).toEqual({ setId: setIds[0], weightKg: 130 });
   });
 
+  it('moves the current holders through the database when a later set wins', async () => {
+    const { exercise, setIds } = await logDay(DATE, [
+      { weightKg: 100, reps: 5 },
+      { weightKg: 120, reps: 8 },
+    ]);
+
+    const after = await getPRsForExercise(exercise.id);
+    const achievements = after.achievements!;
+
+    // The later set now holds weight, estimate, reps and 8RM.
+    expect(achievements.weight).toEqual({ setId: setIds[1], weightKg: 120 });
+    expect(achievements.estimatedOneRepMax?.setId).toBe(setIds[1]);
+    expect(achievements.maxReps?.setId).toBe(setIds[1]);
+    expect(achievements.currentBySetId.get(setIds[1])).toContain('weight');
+
+    // The earlier set keeps history but no longer holds the weight record.
+    expect(achievements.bySetId.get(setIds[0])).toContain('weight');
+    expect(achievements.currentBySetId.get(setIds[0]) ?? []).not.toContain('weight');
+  });
+
+  it('moves the holders back when the winning set is deleted', async () => {
+    const { exercise, setIds } = await logDay(DATE, [
+      { weightKg: 100, reps: 5 },
+      { weightKg: 120, reps: 5 },
+    ]);
+
+    expect((await getPRsForExercise(exercise.id)).achievements!.weight).toEqual({
+      setId: setIds[1],
+      weightKg: 120,
+    });
+
+    await deleteSet(setIds[1]);
+
+    const after = await getPRsForExercise(exercise.id);
+    expect(after.achievements!.weight).toEqual({ setId: setIds[0], weightKg: 100 });
+    expect(after.achievements!.currentBySetId.get(setIds[0])).toContain('weight');
+  });
+
   it('recalculates when the record-setting set is deleted', async () => {
     const { exercise, setIds } = await logDay(DATE, [
       { weightKg: 100, reps: 5 },
@@ -394,6 +510,97 @@ describe('end to end through the database', () => {
     expect(after.achievements!.volume?.volumeKg).toBe(250);
   });
 
+  /**
+   * The full data path, with nothing hand-built:
+   * IndexedDB -> getPRsForExercise -> ExerciseBlock -> rendered summary.
+   */
+  it('renders the summary from real database-backed records', async () => {
+    const { exercise, setIds, sessionId } = await logDay(DATE, [
+      { weightKg: 100, reps: 5 },
+      { weightKg: 120, reps: 8 },
+    ]);
+    const session = blockSession(exercise.name, sessionId);
+
+    const pr = await getPRsForExercise(exercise.id);
+    render(
+      <ExerciseBlock
+        session={session}
+        index={0}
+        total={1}
+        unit="kg"
+        intensity="universal"
+        pr={pr}
+        onMove={() => {}}
+        onRename={() => {}}
+        onDeleteExercise={() => {}}
+        onAddSet={() => {}}
+        onChangeSet={() => {}}
+        onToggleSet={() => {}}
+        onDeleteSet={() => {}}
+      />,
+    );
+
+    const summary = screen.getByLabelText(`Current records for ${session.exerciseName}`);
+    // 120 kg x 8: estimate 120 * (1 + 8/30) = 152; volume 100*5 + 120*8 = 1460.
+    expect(summary.textContent).toContain('e1RM');
+    expect(summary.textContent).toContain('152 kg');
+    expect(summary.textContent).toContain('Reps');
+    expect(summary.textContent).toContain('8');
+    expect(summary.textContent).toContain('8RM');
+    expect(summary.textContent).toContain('Best volume 1460 kg·reps');
+
+    // The heaviest weight has exactly one home: the Phase 5b line. The summary
+    // still mentions 120 kg inside its 8RM entry, which is a different record.
+    expect(screen.getByText('PR 120 kg')).toBeTruthy();
+    expect(screen.queryByLabelText(/^Current heaviest weight/)).toBeNull();
+
+    // The winning set is the only current holder; the earlier one is history.
+    expect(pr.achievements!.currentBySetId.get(setIds[1])).toContain('weight');
+    expect(pr.achievements!.currentBySetId.get(setIds[0]) ?? []).not.toContain('weight');
+  });
+
+  it('updates the rendered summary after a set is edited or deleted', async () => {
+    const { exercise, setIds, sessionId } = await logDay(DATE, [
+      { weightKg: 100, reps: 5 },
+      { weightKg: 120, reps: 8 },
+    ]);
+    const session = blockSession(exercise.name, sessionId);
+
+    const renderCurrent = async () => {
+      cleanup();
+      const pr = await getPRsForExercise(exercise.id);
+      render(
+        <ExerciseBlock
+          session={session}
+          index={0}
+          total={1}
+          unit="kg"
+          intensity="universal"
+          pr={pr}
+          onMove={() => {}}
+          onRename={() => {}}
+          onDeleteExercise={() => {}}
+          onAddSet={() => {}}
+          onChangeSet={() => {}}
+          onToggleSet={() => {}}
+          onDeleteSet={() => {}}
+        />,
+      );
+      return pr;
+    };
+
+    await renderCurrent();
+    expect(screen.getByLabelText(/^Current records/).textContent).toContain('152 kg');
+
+    // Drop the winning set: the summary must fall back to the first set's figures.
+    await deleteSet(setIds[1]);
+    await renderCurrent();
+    const afterDelete = screen.getByLabelText(/^Current records/).textContent ?? '';
+    expect(afterDelete).not.toContain('152 kg');
+    expect(afterDelete).toContain('116.667'); // 100 * (1 + 5/30)
+    expect(screen.getByText('PR 100 kg')).toBeTruthy();
+  });
+
   it('never qualifies an incomplete set', async () => {
     const { exercise, setIds } = await logDay(DATE, [
       { weightKg: 100, reps: 5 },
@@ -423,5 +630,127 @@ describe('end to end through the database', () => {
     const pr = await getPRsForExercise(exercise.id);
     expect(pr.achievements!.weight).toEqual({ setId: expect.any(String), weightKg: 100 });
     expect(pr.achievements!.setCount).toBe(1);
+  });
+});
+
+/**
+ * Phase 6A step 3: current holders in the header, and the split between a
+ * historical badge and the "still holds it" emphasis.
+ */
+describe('current record summary', () => {
+  it('renders the estimate, reps and volume without repeating the weight', () => {
+    renderBlock({
+      pr: {
+        current: { setId: 'hero', weightKg: 120 },
+        achievements: {
+          weightKg: 120,
+          estimatedKg: 150,
+          maxReps: 12,
+          volumeWorkoutExerciseId: 'session-1',
+          volumeKg: 1500,
+        },
+      },
+    });
+
+    const summary = screen.getByLabelText('Current records for Squat');
+    expect(summary.textContent).toContain('e1RM');
+    expect(summary.textContent).toContain('150 kg');
+    expect(summary.textContent).toContain('Reps');
+    expect(summary.textContent).toContain('12');
+    expect(summary.textContent).toContain('Best volume 1500 kg·reps');
+
+    // The heaviest weight is reported once, on the Phase 5b line, not twice.
+    expect(summary.textContent).not.toContain('120 kg');
+    expect(screen.getAllByText(/120 kg/)).toHaveLength(1);
+    expect(screen.getByText('PR 120 kg')).toBeTruthy();
+  });
+
+  it('omits the estimate entirely for a bodyweight exercise', () => {
+    renderBlock({
+      pr: { current: null, achievements: { maxReps: 20 } },
+    });
+
+    const summary = screen.getByLabelText('Current records for Squat');
+    expect(summary.textContent).toContain('20');
+    // No load was ever recorded, so no weight or e1RM figure is invented.
+    expect(summary.textContent).not.toContain('e1RM');
+    expect(summary.textContent).not.toContain('kg');
+  });
+
+  it('renders no summary at all when nothing qualifies', () => {
+    renderBlock({ pr: { current: null, achievements: {} } });
+    expect(screen.queryByLabelText('Current records for Squat')).toBeNull();
+  });
+
+  it('converts every figure with the active unit', () => {
+    renderBlock({
+      unit: 'lb',
+      pr: {
+        current: { setId: 'hero', weightKg: 100 },
+        achievements: { weightKg: 100, estimatedKg: 100, maxReps: 5 },
+      },
+    });
+
+    const summary = screen.getByLabelText('Current records for Squat');
+    expect(summary.textContent).toContain('220.462 lb');
+    expect(summary.textContent).not.toContain(' kg');
+  });
+
+  it('gives each figure its own accessible label', () => {
+    renderBlock({
+      pr: {
+        current: { setId: 'hero', weightKg: 120 },
+        achievements: { weightKg: 120, estimatedKg: 150, maxReps: 12 },
+      },
+    });
+
+    // Weight is intentionally absent here; it is announced by the PR line.
+    expect(screen.queryByLabelText(/^Current heaviest weight/)).toBeNull();
+    expect(screen.getByLabelText('Current estimated 1RM: 150 kg')).toBeTruthy();
+    expect(screen.getByLabelText('Current maximum reps: 12')).toBeTruthy();
+  });
+});
+
+describe('trophy and badge agreement', () => {
+  it('puts the trophy on the current weight holder, not on a surpassed set', () => {
+    renderBlock({
+      sets: [
+        baseSet({ id: 'old', setNumber: 1, weightKg: 100 }),
+        baseSet({ id: 'new', setNumber: 2, weightKg: 120, workoutExerciseId: 'session-1' }),
+      ],
+      // The older set established a record, so it keeps its badge...
+      records: { old: ['weight'], new: ['weight'] },
+      // ...but only `new` still holds it.
+      pr: {
+        current: { setId: 'new', weightKg: 120 },
+        achievements: { current: { new: ['weight'] } },
+      },
+    });
+
+    const marks = screen.getAllByLabelText('Personal record set');
+    expect(marks).toHaveLength(1);
+    // The trophy is on set 2, the current holder.
+    const row = marks[0].closest('li') as HTMLElement;
+    expect((within(row).getByPlaceholderText('kg') as HTMLInputElement).value).toBe('120');
+
+    // Both sets still show the historical badge, and the wording differs.
+    expect(badges(1)[0].getAttribute('aria-label')).toBe('Heaviest weight record, since surpassed');
+    expect(badges(2)[0].getAttribute('aria-label')).toBe('Heaviest weight record, current best');
+  });
+
+  it('never shows two trophies when one set was surpassed in the same day', () => {
+    renderBlock({
+      sets: [
+        baseSet({ id: 'a', setNumber: 1, weightKg: 100 }),
+        baseSet({ id: 'b', setNumber: 2, weightKg: 110 }),
+      ],
+      records: { a: ['weight'], b: ['weight'] },
+      pr: {
+        current: { setId: 'b', weightKg: 110 },
+        achievements: { current: { b: ['weight'] } },
+      },
+    });
+
+    expect(screen.getAllByLabelText('Personal record set')).toHaveLength(1);
   });
 });

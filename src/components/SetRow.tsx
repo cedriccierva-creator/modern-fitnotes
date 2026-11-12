@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { formatWeight, parseRepInput, parseWeightInput } from '../lib/units';
+import { recordLabel } from '../lib/pr';
 import type { SetRecord } from '../lib/pr';
 import type { WorkoutSet } from '../types';
 
@@ -14,14 +15,6 @@ function recordBadge(record: SetRecord): string {
   if (record === 'weight') return 'PR';
   if (record === 'estimatedOneRepMax') return 'e1RM';
   if (record === 'maxReps') return 'Reps';
-  return `${record.slice(2)}RM`;
-}
-
-/** Full name, used for the accessible label and the tooltip. */
-function recordText(record: SetRecord): string {
-  if (record === 'weight') return 'Heaviest weight';
-  if (record === 'estimatedOneRepMax') return 'Estimated 1RM';
-  if (record === 'maxReps') return 'Most reps';
   return `${record.slice(2)}RM`;
 }
 
@@ -40,11 +33,17 @@ interface Props {
   /** True when this set holds the exercise's weight PR. Decided outside. */
   isPr?: boolean;
   /**
-   * Every record this set established, decided outside from workout history.
-   * Empty or absent means no record. Kept alongside `isPr`, which still drives
-   * the trophy exactly as before.
+   * Every record this set established *when it was performed*. This is history
+   * and never shrinks: a set that set a record keeps its badge even after a
+   * later set beats it.
    */
   records?: readonly SetRecord[];
+  /**
+   * The subset of `records` this set still *holds* today. Defaults to `records`,
+   * so a caller that does not distinguish the two gets "everything is current",
+   * which is the pre-existing behaviour. Decided outside; never computed here.
+   */
+  currentRecords?: readonly SetRecord[];
   /**
    * Persist a patch. The returned promise settles when the write has actually
    * happened, which is what lets this row distinguish "saved" from "pending".
@@ -67,10 +66,13 @@ export default function SetRow({
   unit,
   isPr = false,
   records = [],
+  currentRecords,
   onChange,
   onToggle,
   onDelete,
 }: Props) {
+  const held = currentRecords ?? records;
+
   const [weight, setWeight] = useState(() => formatWeight(set.weightKg, unit));
   const [reps, setReps] = useState(() => (set.reps === null ? '' : String(set.reps)));
 
@@ -253,16 +255,29 @@ export default function SetRow({
           aria-label={`Records for set ${set.setNumber}`}
           className="mt-0.5 flex w-full flex-wrap items-center gap-1"
         >
-          {records.map((record) => (
-            <li
-              key={record}
-              aria-label={`${recordText(record)} record`}
-              title={`${recordText(record)} record`}
-              className={`rounded px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide ring-1 ring-inset ${recordTone(record)}`}
-            >
-              {recordBadge(record)}
-            </li>
-          ))}
+          {records.map((record) => {
+            // Two tiers: every badge records what this set achieved, and the
+            // ones still standing are the undimmed, solid-ring ones. A historical
+            // badge is dimmed rather than removed, so nothing is rewritten.
+            const isCurrent = held.includes(record);
+            const name = recordLabel(record);
+            return (
+              <li
+                key={record}
+                aria-label={`${name} record${isCurrent ? ', current best' : ', since surpassed'}`}
+                title={
+                  isCurrent
+                    ? `${name} record — still the current best`
+                    : `${name} record — since surpassed`
+                }
+                className={`rounded px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide ring-1 ring-inset ${
+                  isCurrent ? 'ring-2 ' : 'opacity-60 '
+                }${recordTone(record)}`}
+              >
+                {recordBadge(record)}
+              </li>
+            );
+          })}
         </ul>
       )}
     </li>

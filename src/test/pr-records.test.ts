@@ -470,3 +470,116 @@ describe('labels', () => {
     }
   });
 });
+
+/**
+ * Phase 6A step 3: the difference between *establishing* a record and *holding*
+ * it now. `bySetId` is history and never shrinks; `currentBySetId` is the
+ * present and moves whenever a later set wins.
+ */
+describe('current record holders', () => {
+  it('exposes the current heaviest-weight holder', () => {
+    const achievements = computeRecordAchievements([
+      inSession('s1', '2026-11-01', 1, 100, 5, 'older'),
+      inSession('s1', '2026-11-05', 1, 120, 5, 'newer'),
+    ]);
+
+    expect(achievements.weight).toEqual({ setId: 'newer', weightKg: 120 });
+    expect(achievements.currentBySetId.get('newer')).toContain('weight');
+    expect(achievements.currentBySetId.get('older')).not.toContain('weight');
+    // The older set keeps its historical achievement.
+    expect(recordsOf(achievements, 'older')).toContain('weight');
+  });
+
+  it('exposes the current estimated-1RM holder separately from the heaviest', () => {
+    // 90 x 10 estimates ~120, beating a 105 single's ~108.5.
+    const achievements = computeRecordAchievements([
+      inSession('s1', '2026-11-01', 1, 105, 1, 'heavy-single'),
+      inSession('s1', '2026-11-05', 1, 90, 10, 'light-tens'),
+    ]);
+
+    expect(achievements.estimatedOneRepMax?.setId).toBe('light-tens');
+    expect(achievements.estimatedOneRepMax?.estimatedKg).toBeCloseTo(120, 10);
+    expect(achievements.estimatedOneRepMax?.weightKg).toBe(90);
+    // The heaviest actual weight is still the single: the two never borrow.
+    expect(achievements.weight).toEqual({ setId: 'heavy-single', weightKg: 105 });
+  });
+
+  it('exposes the current maximum-reps holder, including bodyweight sets', () => {
+    const achievements = computeRecordAchievements([
+      inSession('s1', '2026-11-01', 1, null, 12, 'bw-early'),
+      inSession('s1', '2026-11-05', 1, null, 18, 'bw-later'),
+    ]);
+
+    expect(achievements.maxReps?.setId).toBe('bw-later');
+    expect(achievements.maxReps?.reps).toBe(18);
+    expect(achievements.maxReps?.weightKg).toBeNull();
+  });
+
+  it('reports no estimate for a bodyweight-only exercise', () => {
+    const achievements = computeRecordAchievements([
+      inSession('s1', '2026-11-01', 1, null, 15),
+    ]);
+
+    expect(achievements.estimatedOneRepMax).toBeNull();
+    expect(achievements.weight).toBeNull();
+    expect(achievements.maxReps?.reps).toBe(15);
+  });
+
+  it('exposes the current session-volume holder', () => {
+    const achievements = computeRecordAchievements([
+      inSession('small', '2026-11-01', 1, 100, 5),
+      inSession('big', '2026-11-05', 1, 200, 5),
+    ]);
+
+    expect(achievements.volume?.workoutExerciseId).toBe('big');
+    expect(achievements.volume?.volumeKg).toBe(1000);
+  });
+
+  it('moves every holder when one later set improves several metrics at once', () => {
+    const achievements = computeRecordAchievements([
+      inSession('s1', '2026-11-01', 1, 100, 5, 'older'),
+      // Heavier, more reps and a better estimate all in one set.
+      inSession('s1', '2026-11-05', 1, 120, 8, 'hero'),
+    ]);
+
+    const held = achievements.currentBySetId.get('hero') ?? [];
+    expect(held).toContain('weight');
+    expect(held).toContain('estimatedOneRepMax');
+    expect(held).toContain('maxReps');
+    expect(held).toContain('rm8');
+    // The older set keeps only the 5RM: the later set improved weight, reps and
+    // the estimate, but never repeated five reps, so that record is untouched.
+    expect(achievements.currentBySetId.get('older')).toEqual(['rm5']);
+    // Both sets still hold history.
+    expect(recordsOf(achievements, 'older')).toContain('weight');
+    expect(recordsOf(achievements, 'hero')).toContain('weight');
+  });
+
+  it('keeps independent rep-count records on the set that still holds each', () => {
+    const achievements = computeRecordAchievements([
+      inSession('s1', '2026-11-01', 1, 100, 5, 'fiver'),
+      inSession('s1', '2026-11-05', 1, 110, 8, 'eighter'),
+    ]);
+
+    // The 8-rep set wins 8RM and the estimate, but the 5RM still belongs to the
+    // earlier set because the later set never repeated five reps.
+    expect(achievements.currentBySetId.get('fiver')).toEqual(['rm5']);
+    expect(achievements.currentBySetId.get('eighter')).toContain('rm8');
+    expect(achievements.currentBySetId.get('eighter')).not.toContain('rm5');
+  });
+
+  it('holds nothing for a set whose every record was surpassed', () => {
+    const achievements = computeRecordAchievements([
+      inSession('s1', '2026-11-01', 1, 100, 5, 'beaten'),
+      inSession('s1', '2026-11-05', 1, 150, 5, 'winner'),
+    ]);
+
+    // The beaten set loses the weight record but keeps `maxReps`: five reps is a
+    // tie, and a tie never creates a second holder.
+    expect(achievements.currentBySetId.get('beaten')).toEqual(['maxReps']);
+    expect(achievements.currentBySetId.get('beaten')).not.toContain('weight');
+    expect(achievements.currentBySetId.get('winner')).toContain('weight');
+    // The surpassed set is still listed in history, so its badge survives.
+    expect(recordsOf(achievements, 'beaten')).toContain('weight');
+  });
+});
