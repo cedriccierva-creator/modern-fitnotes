@@ -245,6 +245,20 @@ export const REP_RANGE_MAX = 10;
 /** Epley's denominator constant: `w * (1 + reps / 30)`. */
 const EPLEY_DIVISOR = 30;
 
+/**
+ * The highest rep count Epley's formula is trusted for.
+ *
+ * Epley is fitted around low-rep, near-maximal work. Past ten reps the linear
+ * term inflates fast (at 20 reps it predicts 1.67x the load, at 30 reps 2x), so
+ * a long set of light work would invent a bigger "1RM" than any real single and
+ * steal the record. Eleven reps and above therefore yield no estimate at all.
+ *
+ * Only estimation is gated: high-rep sets still set max-reps records and still
+ * count toward session volume, and 1RM-10RM records are exact counts, not
+ * estimates, so they are untouched.
+ */
+export const EPLEY_MAX_REPS = 10;
+
 /** A set is only considered at all if it was not explicitly un-completed. */
 export function isEligible(set: SetPerformance): boolean {
   return set.completed !== false;
@@ -354,6 +368,7 @@ export function estimatedOneRepMax(set: SetPerformance): number | null {
   const weight = eligibleWeightKg(set);
   const reps = eligibleReps(set);
   if (weight === null || reps === null) return null;
+  if (reps > EPLEY_MAX_REPS) return null;
   return weight * (1 + reps / EPLEY_DIVISOR);
 }
 
@@ -670,10 +685,10 @@ export function computeRecordAchievements(
       }
     }
 
-    // C. Estimated 1RM, compared at a floor of one rep.
-    if (weight !== null && reps !== null) {
-      const comparableReps = Math.max(reps, 1);
-      const estimate = weight * (1 + comparableReps / EPLEY_DIVISOR);
+    // C. Estimated 1RM. Delegates to `estimatedOneRepMax` so the rep cap and
+    // the formula have exactly one definition; a second inline copy could drift.
+    const estimate = estimatedOneRepMax(set);
+    if (estimate !== null) {
       if (bestEstimate === null || isImprovement(estimate, bestEstimate)) {
         bestEstimate = estimate;
         earned.push('estimatedOneRepMax');

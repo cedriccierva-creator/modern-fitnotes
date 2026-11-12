@@ -53,11 +53,13 @@ function renderBlock({
   records = {},
   pr = null,
   session = baseSession({ sets }),
+  unit = 'kg',
 }: {
   sets?: WorkoutSet[];
   records?: Record<string, SetRecord[]>;
   pr?: Parameters<typeof makePr>[0] | null;
   session?: SessionExercise;
+  unit?: 'kg' | 'lb';
 } = {}) {
   const exercisePr = pr === null ? null : makePr(pr);
   const withBadges =
@@ -76,7 +78,7 @@ function renderBlock({
       session={session}
       index={0}
       total={1}
-      unit="kg"
+      unit={unit}
       intensity="universal"
       pr={withBadges}
       onMove={() => {}}
@@ -240,8 +242,18 @@ describe('session volume indicator', () => {
   it('shows the volume record on the session that holds it', () => {
     renderBlock({ pr: { achievements: { volumeWorkoutExerciseId: 'session-1', volumeKg: 1500 } } });
 
-    expect(screen.getByText('Best volume 1500 kg')).toBeTruthy();
+    expect(screen.getByText('Best volume 1500 kg·reps')).toBeTruthy();
     expect(screen.getByLabelText('Best session volume record')).toBeTruthy();
+  });
+
+  it('labels the volume with the rep multiplier in the active unit', () => {
+    // 1500 kg = 3307.… lb, so the figure follows the unit toggle while the
+    // `·reps` multiplier stays put: volume is weight x reps, not a weight.
+    renderBlock({ pr: { achievements: { volumeWorkoutExerciseId: 'session-1', volumeKg: 1500 } }, unit: 'lb' });
+
+    const text = screen.getByText(/Best volume/).textContent ?? '';
+    expect(text).toContain('lb·reps');
+    expect(text).not.toContain('kg·reps');
   });
 
   it('does not show it on a different session of the same exercise', () => {

@@ -136,6 +136,10 @@ export default function ExerciseBlock({
             Session-volume record. It belongs to the session, not to any one set,
             so it is shown here and never attached to a set row. Only the session
             that actually holds the record shows it.
+
+            Volume is weight x reps, so the figure is composed: the converted
+            weight carries the unit-suffixed label (`kg` or `lb`) and the rep
+            factor is appended as a bare `·reps` multiplier.
           */}
           {volumeRecordHere === null ? null : (
             <p className="mt-0.5 text-[11px] font-semibold text-teal-300">
@@ -143,7 +147,7 @@ export default function ExerciseBlock({
                 <span aria-hidden="true">◆ </span>
               </span>
               <span aria-live="polite">
-                Best volume {formatWeight(volumeRecordHere.volumeKg, unit)} {unit}
+                Best volume {formatWeight(volumeRecordHere.volumeKg, unit)} {unit}·reps
               </span>
             </p>
           )}

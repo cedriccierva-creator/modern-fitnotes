@@ -198,7 +198,32 @@ describe('estimated 1RM (Epley)', () => {
     expect(estimatedOneRepMax(perf({ weightKg: 100, reps: 5 }))).toBeCloseTo(116.666_7, 3);
     expect(estimatedOneRepMax(perf({ weightKg: 100, reps: 1 }))).toBeCloseTo(103.333_3, 3);
     expect(estimatedOneRepMax(perf({ weightKg: 60, reps: 10 }))).toBeCloseTo(80, 10);
-    expect(estimatedOneRepMax(perf({ weightKg: 90, reps: 30 }))).toBeCloseTo(180, 10);
+  });
+
+  it('trusts Epley up to ten reps and refuses eleven or more', () => {
+    // The boundary is inclusive at ten: 60 * (1 + 10/30) = 80.
+    expect(estimatedOneRepMax(perf({ weightKg: 60, reps: 10 }))).toBeCloseTo(80, 10);
+    // One past it produces no estimate at all, rather than a huge one.
+    expect(estimatedOneRepMax(perf({ weightKg: 60, reps: 11 }))).toBeNull();
+    expect(estimatedOneRepMax(perf({ weightKg: 90, reps: 30 }))).toBeNull();
+  });
+
+  it('never lets a high-rep set take the estimate from a real single', () => {
+    // Without the cap, 40 kg x 20 would estimate ~66.7 and beat 60 kg x 1.
+    const history = [
+      perf({ setId: 'real-single', date: '2026-11-01', weightKg: 60, reps: 1 }),
+      perf({ setId: 'light-marathon', date: '2026-11-05', weightKg: 40, reps: 20 }),
+    ];
+
+    expect(bestEstimatedOneRepMax(history)?.setId).toBe('real-single');
+  });
+
+  it('leaves high-rep sets in the max-reps and volume metrics', () => {
+    // The cap is about estimation only.
+    const history = [perf({ setId: 'marathon', weightKg: 40, reps: 20 })];
+
+    expect(bestMaxReps(history)?.setId).toBe('marathon');
+    expect(bestSessionVolume(history)?.volumeKg).toBe(800);
   });
 
   it('refuses a bodyweight set rather than inventing a load', () => {
