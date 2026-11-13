@@ -37,9 +37,18 @@ export async function loadExercisePerformance(exerciseId: string): Promise<SetPe
     .where('workoutExerciseId')
     .anyOf(sessions.map((session) => session.id))
     .toArray();
+  if (sets.length === 0) return [];
 
-  const days = await db.workoutDays.toArray();
-  const dateByDayId = new Map(days.map((day) => [day.id, day.date]));
+  // Fetch only the days these sets reference, in one indexed read, rather than
+  // scanning the whole workoutDays table on every PR read. Keys come from the
+  // sets (not the sessions) because the join below looks up set.workoutDayId.
+  const dayIds = [...new Set(sets.map((set) => set.workoutDayId))];
+  const days = await db.workoutDays.bulkGet(dayIds);
+  const dateByDayId = new Map<string, string>();
+  for (const day of days) {
+    // A missing day is an orphan: bulkGet yields undefined, skipped below.
+    if (day !== undefined) dateByDayId.set(day.id, day.date);
+  }
   const sessionById = new Map(sessions.map((session) => [session.id, session]));
 
   const performance: SetPerformance[] = [];
