@@ -70,11 +70,21 @@ export async function removePlannedDay(date: string): Promise<void> {
 
 /** Dates in `dates` that already hold a logged workout. */
 export async function loadLoggedDates(dates: readonly string[]): Promise<Set<string>> {
-  const logged = new Set<string>();
-  for (const date of dates) {
-    if ((await db.workoutDays.where('date').equals(date).count()) > 0) logged.add(date);
-  }
-  return logged;
+  // Nothing asked for, nothing to read: skip the query entirely.
+  if (dates.length === 0) return new Set<string>();
+
+  /*
+   * One indexed query for every date, rather than one `count()` per date. A month
+   * grid asks about 42 dates, and the per-date loop issued 42 separate
+   * transactions for the same answer.
+   *
+   * `workoutDays.date` is the `&date` unique index, so at most one row can match
+   * a given date and duplicate keys in `dates` are harmless: `anyOf` yields each
+   * matching record once. The Set is keyed on the stored `date` value, which is
+   * the same "YYYY-MM-DD" string the caller passed in.
+   */
+  const rows = await db.workoutDays.where('date').anyOf(dates).toArray();
+  return new Set(rows.map((row) => row.date));
 }
 
 /** Whether one local calendar day already holds a logged workout. */
