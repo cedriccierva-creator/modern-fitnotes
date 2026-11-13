@@ -61,6 +61,55 @@ function mergePrs(
 }
 
 /**
+ * Merge a *targeted* records read into the map.
+ *
+ * The read answered for a single exercise, so every other entry is carried over
+ * exactly as it was -- same object, same position. That is what keeps the blocks
+ * for the untouched exercises comparing equal, and it is what a full refresh
+ * cannot offer on its own, because a full read's map only contains the exercises
+ * it happened to ask about.
+ *
+ * When the affected exercise's record did not actually move, its previous object
+ * is kept too, so an edit that changes no record is a no-op render. As with
+ * `mergePrs`, the previous map itself is returned when nothing changed at all.
+ */
+function mergeTargetedPrs(
+  previous: ReadonlyMap<string, ExercisePR>,
+  next: ReadonlyMap<string, ExercisePR>,
+): ReadonlyMap<string, ExercisePR> {
+  let changed = false;
+  const merged = new Map(previous);
+
+  for (const [exerciseId, pr] of next) {
+    const prior = previous.get(exerciseId);
+    if (prior !== undefined && samePr(prior, pr)) continue;
+    merged.set(exerciseId, pr);
+    changed = true;
+  }
+
+  return changed ? merged : previous;
+}
+
+/**
+ * The map without one exercise's record.
+ *
+ * A targeted read that fails is answered with "no record" for the exercise it
+ * asked about -- the same answer a failed lookup gave before the split, because
+ * absence from the map is how the UI shows nothing rather than something stale.
+ * Every unrelated entry is left untouched.
+ */
+function withoutPr(
+  previous: ReadonlyMap<string, ExercisePR>,
+  exerciseId: string,
+): ReadonlyMap<string, ExercisePR> {
+  if (!previous.has(exerciseId)) return previous;
+
+  const merged = new Map(previous);
+  merged.delete(exerciseId);
+  return merged;
+}
+
+/**
  * One PR value is unchanged when the same sets hold the same records.
  *
  * Compared field by field rather than by reference, because the engine returns
@@ -150,8 +199,21 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
   /**
    * Day data and records: the sessions of `date` and the PRs for the exercises
    * they use. This is everything a set write can change.
+   *
+   * `affectedExerciseId` names the one exercise a set write can have moved. PRs
+   * are per exercise -- `computeExercisePrView` reads nothing but that exercise's
+   * own history -- so when the caller knows which exercise changed, only that
+   * exercise's records are re-read, and the batch still answers from the same
+   * three shared queries, just over one history instead of every history in the
+   * day.
+   *
+   * Nothing is passed for a change that can move more than one exercise's
+   * records: mount, a date change, attaching or removing an exercise, reordering
+   * a day, or renaming a session row. An id that is no longer part of the day
+   * also falls back to the full read rather than answering for an exercise the
+   * day does not have.
    */
-  const refreshDay = useCallback(() => {
+  const refreshDay = useCallback((affectedExerciseId?: string) => {
     const ticket = ++dayGeneration.current;
 
     void loadDay(date).then((details) => {
@@ -161,31 +223,53 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       setDayId(details.day?.id ?? null);
       setSessions(details.exercises);
 
-      // One PR read for the whole day, keyed by distinct exercise rather than by
-      // session row: the batch answers every exercise from three shared queries
-      // and isolates failures per exercise internally.
+      /*
+       * One PR read, keyed by distinct exercise rather than by session row: the
+       * batch answers every exercise it is given from three shared queries and
+       * isolates failures per exercise internally.
+       */
       const exerciseIds = [...new Set(details.exercises.map((session) => session.exerciseId))];
+
+      /*
+       * The targeted case is decided from the freshly read day, so a stale id
+       * cannot narrow the read to an exercise that is gone: the day read above is
+       * the authority on what the day holds right now.
+       */
+      const targetedId =
+        affectedExerciseId !== undefined && exerciseIds.includes(affectedExerciseId)
+          ? affectedExerciseId
+          : undefined;
+      const requested = targetedId === undefined ? exerciseIds : [targetedId];
 
       /*
        * A failed exercise is absent from the map, so the UI shows no PR rather
        * than a stale one, and logging keeps working either way. The read is not
        * expected to reject -- it falls back to per-exercise reads first -- but a
-       * rejection is handled rather than left floating: every record is dropped,
-       * which is the same "show nothing" answer a failed lookup gives today.
+       * rejection is handled rather than left floating.
+       *
+       * A full read's map *is* the day's key set, so a rejection there drops
+       * every record, which is the same "show nothing" answer a failed lookup
+       * gives today. A targeted read only speaks for one exercise, so a rejection
+       * drops that one record and leaves the rest of the map alone: one failed
+       * lookup must never cost an unrelated exercise its PR.
        *
        * The second argument is a later commit than the day read above. Keeping
        * the previous map when nothing actually changed means it is a no-op
        * render, and the memoised blocks below then skip in one comparison
        * instead of re-rendering the whole tree for identical data.
        */
-      void getPRsForExercises(exerciseIds).then(
+      void getPRsForExercises(requested).then(
         (next) => {
           if (ticket !== dayGeneration.current) return;
-          setPrs((previous) => mergePrs(previous, next));
+          setPrs((previous) =>
+            targetedId === undefined ? mergePrs(previous, next) : mergeTargetedPrs(previous, next),
+          );
         },
         () => {
           if (ticket !== dayGeneration.current) return;
-          setPrs((previous) => mergePrs(previous, new Map()));
+          setPrs((previous) =>
+            targetedId === undefined ? mergePrs(previous, new Map()) : withoutPr(previous, targetedId),
+          );
         },
       );
     });
@@ -330,8 +414,11 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
    * before the row is re-rendered, so a typed value is never dropped by the
    * refresh that follows a toggle. The promise rejects if the write fails, which
    * is how `SetRow` knows not to treat the draft as saved.
+   *
+   * `exerciseId` is the exercise that owns the row, so the refresh that follows
+   * re-reads that one exercise's records instead of the whole day's.
    */
-  const toggle = useCallback(async (setId: string, completed: boolean, patch?: TogglePatch): Promise<void> => {
+  const toggle = useCallback(async (setId: string, exerciseId: string, completed: boolean, patch?: TogglePatch): Promise<void> => {
     const next = { completed: !completed, ...patch };
     try {
       await updateSet(setId, next);
@@ -340,22 +427,26 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       console.error('Could not update set', setId, error);
       return;
     }
-    refreshDay();
+    refreshDay(exerciseId);
   }, [refreshDay]);
 
   /**
    * Persist a non-toggle patch (blur commits, reps). Resolves only after the
    * write and the refresh, and rejects when the write fails so the caller can
    * keep the value pending instead of pretending it was saved.
+   *
+   * `exerciseId` is `undefined` only when the row could not be traced back to a
+   * session in the current day; the refresh then falls back to the whole day,
+   * which is always correct even if it is not the cheapest answer.
    */
-  const patchSet = useCallback(async (setId: string, patch: { weightKg?: number | null; reps?: number | null }): Promise<void> => {
+  const patchSet = useCallback(async (setId: string, exerciseId: string | undefined, patch: { weightKg?: number | null; reps?: number | null }): Promise<void> => {
     try {
       await updateSet(setId, patch);
     } catch (error) {
       console.error('Could not save set weight', setId, error);
       throw error;
     }
-    refreshDay();
+    refreshDay(exerciseId);
   }, [refreshDay]);
 
   function changeUnit(next: 'kg' | 'lb'): void {
@@ -395,6 +486,21 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
     const findSession = (sessionId: string): SessionExercise | undefined =>
       live.current.sessions.find((session) => session.id === sessionId);
 
+    /**
+     * The exercise that owns a set row, read from the live day.
+     *
+     * A set write moves the records of exactly one exercise, and this is how the
+     * set-id-only handlers below name it without closing over a render: the
+     * bundles are cached by session id and outlive the render they were built in,
+     * which is why `live` exists at all.
+     */
+    const exerciseIdForSet = (setId: string): string | undefined => {
+      for (const session of live.current.sessions) {
+        if (session.sets.some((row) => row.id === setId)) return session.exerciseId;
+      }
+      return undefined;
+    };
+
     return {
       move(sessionId: string, direction: -1 | 1): void {
         const { sessions: current, dayId: currentDayId } = live.current;
@@ -404,15 +510,24 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
 
         const order = current.map((session) => session.id);
         [order[index], order[target]] = [order[target], order[index]];
-        void reorderExercises(currentDayId, order).then(refreshDay);
+        /*
+         * A move rewrites `order` on two session rows, and that position is part
+         * of the PR ordering, so both exercises' records are re-read: no
+         * affected-exercise id is passed.
+         */
+        void reorderExercises(currentDayId, order).then(() => refreshDay());
       },
 
       rename(sessionId: string, name: string): void {
-        void updateSessionName(sessionId, name).then(refreshDay);
+        // The record's name comes from the session snapshot, so a whole-day
+        // refresh is the honest answer here as well.
+        void updateSessionName(sessionId, name).then(() => refreshDay());
       },
 
       remove(sessionId: string): void {
-        void removeExerciseFromDay(sessionId).then(refreshDay);
+        // Removing a session drops an exercise from the day: every remaining
+        // exercise's entry has to be reconciled.
+        void removeExerciseFromDay(sessionId).then(() => refreshDay());
       },
 
       addSet(sessionId: string): void {
@@ -422,23 +537,28 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
         // with, so `preset.repMin` here would be the value from that render.
         const { current: repMin } = liveRepMin;
         const reps = session.note === undefined ? repMin : (session.sets[0]?.reps ?? repMin);
-        void addSetsToExercise(session.id, 1, reps).then(refreshDay);
+        void addSetsToExercise(session.id, 1, reps).then(() => refreshDay(session.exerciseId));
       },
 
       changeSet(setId: string, patch: { weightKg?: number | null; reps?: number | null }): Promise<void> {
-        return patchSet(setId, patch);
+        return patchSet(setId, exerciseIdForSet(setId), patch);
       },
 
       toggleSet(setId: string, patch?: TogglePatch): Promise<void> {
         for (const session of live.current.sessions) {
           const set = session.sets.find((row) => row.id === setId);
-          if (set !== undefined) return toggle(setId, set.completed, patch);
+          if (set !== undefined) return toggle(setId, session.exerciseId, set.completed, patch);
         }
         return Promise.resolve();
       },
 
       deleteSet(setId: string): void {
-        void deleteSet(setId).then(refreshDay);
+        /*
+         * Resolved before the write: once the row is deleted the live day no
+         * longer holds it, and the refresh would have nothing to name.
+         */
+        const exerciseId = exerciseIdForSet(setId);
+        void deleteSet(setId).then(() => refreshDay(exerciseId));
       },
     };
   }, [refreshDay, patchSet, toggle]);
