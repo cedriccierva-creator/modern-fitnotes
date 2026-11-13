@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import SetRow from './SetRow';
 import { findIntensity, intensityFromNote } from '../lib/intensity';
 import { formatWeight } from '../lib/units';
@@ -30,9 +30,19 @@ interface Props {
   /** Completion toggle; `patch` carries an unsaved weight draft, if any. */
   onToggleSet: (setId: string, patch?: TogglePatch) => void | Promise<void>;
   onDeleteSet: (setId: string) => void;
+  /**
+   * Whether the session-volume record belongs to this block.
+   *
+   * Passed in as a boolean rather than letting the block compare
+   * `achievements.volume.workoutExerciseId` itself: that comparison is the only
+   * thing that varies per block, and hoisting it to the parent keeps this prop
+   * a primitive so memo can bail out on it. Optional so a caller that does not
+   * supply it (the component tests) keeps the previous behaviour.
+   */
+  isVolumeRecordHere?: boolean;
 }
 
-export default function ExerciseBlock({
+function ExerciseBlockComponent({
   session,
   index,
   total,
@@ -46,6 +56,7 @@ export default function ExerciseBlock({
   onChangeSet,
   onToggleSet,
   onDeleteSet,
+  isVolumeRecordHere,
 }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(session.exerciseName);
@@ -62,14 +73,24 @@ export default function ExerciseBlock({
   const currentPr = pr?.current ?? null;
   const trophySetIds = pr?.trophySetIds ?? [];
   const achievements = pr?.achievements;
-  // Only the session that holds the volume record displays it; a second block
-  // for the same exercise on another day stays clean.
+  /*
+   * Only the session that holds the volume record displays it; a second block
+   * for the same exercise on another day stays clean.
+   *
+   * The parent hoists the decision into `isVolumeRecordHere`, so this file does
+   * not compare ids while rendering. When the prop is omitted the original
+   * comparison is used, which keeps a direct caller (such as a component test
+   * that passes only the older props) behaving exactly as before.
+   */
+  const volumeAchievement = achievements?.volume ?? null;
   const volumeRecordHere =
-    achievements?.volume !== undefined &&
-    achievements.volume !== null &&
-    achievements.volume.workoutExerciseId === session.id
-      ? achievements.volume
-      : null;
+    isVolumeRecordHere === undefined
+      ? volumeAchievement !== null && volumeAchievement.workoutExerciseId === session.id
+        ? volumeAchievement
+        : null
+      : isVolumeRecordHere
+        ? volumeAchievement
+        : null;
 
   /*
    * The trophy means "this set holds the record *now*", not "this set set a
@@ -266,3 +287,98 @@ export default function ExerciseBlock({
     </article>
   );
 }
+
+/**
+ * True when two sessions describe the same exercise with the same sets.
+ *
+ * A reference check is useless here: every refresh re-reads IndexedDB and Dexie
+ * materialises fresh objects, so `<WorkoutScreen>`'s blocks would always look
+ * changed. Comparing the fields the render actually reads (plus each set's
+ * editable state, by id) is what lets an untouched block bail out.
+ */
+function sameSession(a: SessionExercise, b: SessionExercise): boolean {
+  if (a === b) return true;
+  if (
+    a.id !== b.id ||
+    a.exerciseId !== b.exerciseId ||
+    a.exerciseName !== b.exerciseName ||
+    a.order !== b.order ||
+    a.note !== b.note ||
+    a.sets.length !== b.sets.length
+  ) {
+    return false;
+  }
+  for (let index = 0; index < a.sets.length; index += 1) {
+    const left = a.sets[index];
+    const right = b.sets[index];
+    if (
+      left.id !== right.id ||
+      left.setNumber !== right.setNumber ||
+      left.weightKg !== right.weightKg ||
+      left.reps !== right.reps ||
+      left.completed !== right.completed
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** True when the two PR values would render identically. */
+function samePrValue(a: ExercisePR | null | undefined, b: ExercisePR | null | undefined): boolean {
+  if (a === b) return true;
+  if (a === null || a === undefined || b === null || b === undefined) return false;
+  if (a.exerciseName !== b.exerciseName) return false;
+  if (a.current?.setId !== b.current?.setId) return false;
+  if (a.current?.weightKg !== b.current?.weightKg) return false;
+  if (a.trophySetIds.length !== b.trophySetIds.length) return false;
+  for (let index = 0; index < a.trophySetIds.length; index += 1) {
+    if (a.trophySetIds[index] !== b.trophySetIds[index]) return false;
+  }
+  const left = a.achievements;
+  const right = b.achievements;
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.weight?.setId === right.weight?.setId &&
+    left.weight?.weightKg === right.weight?.weightKg &&
+    left.estimatedOneRepMax?.setId === right.estimatedOneRepMax?.setId &&
+    left.maxReps?.setId === right.maxReps?.setId &&
+    left.volume?.workoutExerciseId === right.volume?.workoutExerciseId &&
+    left.volume?.volumeKg === right.volume?.volumeKg &&
+    left.setCount === right.setCount
+  );
+}
+
+/**
+ * Memoised so a refresh that leaves this exercise untouched does not re-render
+ * it.
+ *
+ * The comparison is by value for the two data props, because Dexie hands back new
+ * objects on every read, and by identity for everything else -- the parent keeps
+ * the callbacks and the hoisted `isVolumeRecordHere` primitive stable. `total` is
+ * compared too, since it drives the "move down" disabled state.
+ */
+export const ExerciseBlock = memo(
+  ExerciseBlockComponent,
+  (prev, next) =>
+    prev.index === next.index &&
+    prev.total === next.total &&
+    prev.unit === next.unit &&
+    prev.intensity === next.intensity &&
+    prev.isVolumeRecordHere === next.isVolumeRecordHere &&
+    prev.onMove === next.onMove &&
+    prev.onRename === next.onRename &&
+    prev.onDeleteExercise === next.onDeleteExercise &&
+    prev.onAddSet === next.onAddSet &&
+    /*
+     * The set-level callbacks are deliberately *not* compared: this component
+     * passes each row a fresh arrow bound to that row's id, so their identity
+     * changes every render. What matters is that the row's own data did not
+     * change, and `sameSession` already covers every set field.
+     */
+    samePrValue(prev.pr, next.pr) &&
+    sameSession(prev.session, next.session),
+);
+ExerciseBlock.displayName = 'ExerciseBlock';
+
+export default ExerciseBlock;

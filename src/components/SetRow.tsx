@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { formatWeight, parseRepInput, parseWeightInput } from '../lib/units';
 import { recordLabel } from '../lib/pr';
 import type { SetRecord } from '../lib/pr';
@@ -60,8 +60,14 @@ interface Props {
 /**
  * One editable set row. Weight is typed in the display unit but converted to
  * kilograms on parse, so nothing is ever stored in pounds.
+ *
+ * Memoised: a workout refresh re-reads the day and renders every block, so a row
+ * whose data did not change would otherwise re-render too. The comparison is by
+ * value for the row itself (Dexie returns new objects on every read, so identity
+ * never matches) and by identity for the callbacks, which the parent keeps
+ * stable for exactly this reason.
  */
-export default function SetRow({
+function SetRowComponent({
   set,
   unit,
   isPr = false,
@@ -283,3 +289,46 @@ export default function SetRow({
     </li>
   );
 }
+
+/**
+ * Named export for the memo, matching how `ExerciseBlock` exports its own.
+ *
+ * The `set` prop is compared by value rather than by reference: a refresh re-reads
+ * IndexedDB and Dexie builds new row objects every time, so a reference check
+ * would never bail out. Only the fields this row renders or edits are compared.
+ * Every callback is identity-stable in the parent, so identity is enough for them.
+ */
+export const SetRow = memo(
+  SetRowComponent,
+  (prev, next) =>
+    prev.unit === next.unit &&
+    prev.isPr === next.isPr &&
+    prev.onChange === next.onChange &&
+    prev.onToggle === next.onToggle &&
+    prev.onDelete === next.onDelete &&
+    prev.set.id === next.set.id &&
+    prev.set.setNumber === next.set.setNumber &&
+    prev.set.weightKg === next.set.weightKg &&
+    prev.set.reps === next.set.reps &&
+    prev.set.completed === next.set.completed &&
+    sameRecords(prev.records, next.records) &&
+    sameRecords(prev.currentRecords, next.currentRecords),
+);
+
+/** Shallow equality for a record badge list, treating absent and empty alike. */
+function sameRecords(
+  a: readonly SetRecord[] | undefined,
+  b: readonly SetRecord[] | undefined,
+): boolean {
+  if (a === b) return true;
+  const left = a ?? [];
+  const right = b ?? [];
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+SetRow.displayName = 'SetRow';
+
+export default SetRow;

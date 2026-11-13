@@ -31,6 +31,69 @@ import type { ExercisePR } from '../lib/pr';
 import type { Exercise, WorkoutSet } from '../types';
 
 /**
+ * Reuse the previous PR value for every exercise whose records did not change.
+ *
+ * `getPRsForExercise` rebuilds its result on every read, so without this each
+ * refresh produced an entirely new map of new objects and every memoised block
+ * re-rendered even though no record had changed. Unchanged exercises keep their
+ * previous identity, so their blocks compare equal and skip rendering. When
+ * nothing at all changed the previous map itself is returned, which makes the
+ * whole update a no-op.
+ */
+function mergePrs(
+  previous: ReadonlyMap<string, ExercisePR>,
+  next: ReadonlyMap<string, ExercisePR>,
+): ReadonlyMap<string, ExercisePR> {
+  let changed = previous.size !== next.size;
+  const merged = new Map<string, ExercisePR>();
+
+  for (const [exerciseId, pr] of next) {
+    const prior = previous.get(exerciseId);
+    if (prior !== undefined && samePr(prior, pr)) {
+      merged.set(exerciseId, prior);
+      continue;
+    }
+    merged.set(exerciseId, pr);
+    changed = true;
+  }
+
+  return changed ? merged : previous;
+}
+
+/**
+ * One PR value is unchanged when the same sets hold the same records.
+ *
+ * Compared field by field rather than by reference, because the engine returns
+ * fresh objects every read. Only what the UI can display is compared: the
+ * current PR, the trophy set ids, and the achievement holders behind the badges
+ * and the record summary.
+ */
+function samePr(a: ExercisePR, b: ExercisePR): boolean {
+  if (a === b) return true;
+  if (a.exerciseName !== b.exerciseName) return false;
+  if (a.current?.setId !== b.current?.setId) return false;
+  if (a.current?.weightKg !== b.current?.weightKg) return false;
+  if (a.history.length !== b.history.length) return false;
+  if (a.trophySetIds.length !== b.trophySetIds.length) return false;
+  for (let index = 0; index < a.trophySetIds.length; index += 1) {
+    if (a.trophySetIds[index] !== b.trophySetIds[index]) return false;
+  }
+
+  const left = a.achievements;
+  const right = b.achievements;
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.weight?.setId === right.weight?.setId &&
+    left.weight?.weightKg === right.weight?.weightKg &&
+    left.estimatedOneRepMax?.setId === right.estimatedOneRepMax?.setId &&
+    left.maxReps?.setId === right.maxReps?.setId &&
+    left.volume?.workoutExerciseId === right.volume?.workoutExerciseId &&
+    left.volume?.volumeKg === right.volume?.volumeKg &&
+    left.setCount === right.setCount
+  );
+}
+
+/**
  * Logging screen for one local date.
  *
  * Everything is written straight through Dexie; the exercise *library* and the
@@ -81,6 +144,8 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
 
     void loadDay(date).then((details) => {
       if (ticket !== generation.current) return;
+      // Committed as soon as the day read lands, exactly as before: the exercise
+      // list must never wait on the PR reads.
       setDayId(details.day?.id ?? null);
       setSessions(details.exercises);
 
@@ -96,7 +161,13 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
           // than a stale one. Logging keeps working either way.
           if (result.status === 'fulfilled') next.set(exerciseIds[index], result.value);
         });
-        setPrs(next);
+        /*
+         * This is a second, later commit than the day read above. Keeping the
+         * previous map when nothing actually changed means it is a no-op render,
+         * and the memoised blocks below then skip in one comparison instead of
+         * re-rendering the whole tree for identical data.
+         */
+        setPrs((previous) => mergePrs(previous, next));
       });
     });
 
@@ -118,16 +189,6 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
   }, []);
 
   const preset = findIntensity(intensity);
-
-  async function move(index: number, direction: -1 | 1): Promise<void> {
-    const target = index + direction;
-    if (!dayId || target < 0 || target >= sessions.length) return;
-
-    const order = sessions.map((session) => session.id);
-    [order[index], order[target]] = [order[target], order[index]];
-    await reorderExercises(dayId, order);
-    refresh();
-  }
 
   async function attach(exercise: Exercise): Promise<void> {
     await addExerciseToDay(date, exercise, intensity);
@@ -192,7 +253,7 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
    * refresh that follows a toggle. The promise rejects if the write fails, which
    * is how `SetRow` knows not to treat the draft as saved.
    */
-  async function toggle(setId: string, completed: boolean, patch?: TogglePatch): Promise<void> {
+  const toggle = useCallback(async (setId: string, completed: boolean, patch?: TogglePatch): Promise<void> => {
     const next = { completed: !completed, ...patch };
     try {
       await updateSet(setId, next);
@@ -202,14 +263,14 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       return;
     }
     refresh();
-  }
+  }, [refresh]);
 
   /**
    * Persist a non-toggle patch (blur commits, reps). Resolves only after the
    * write and the refresh, and rejects when the write fails so the caller can
    * keep the value pending instead of pretending it was saved.
    */
-  async function patchSet(setId: string, patch: { weightKg?: number | null; reps?: number | null }): Promise<void> {
+  const patchSet = useCallback(async (setId: string, patch: { weightKg?: number | null; reps?: number | null }): Promise<void> => {
     try {
       await updateSet(setId, patch);
     } catch (error) {
@@ -217,26 +278,133 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       throw error;
     }
     refresh();
-  }
-
-  async function addSet(session: SessionExercise): Promise<void> {
-    const reps =
-      session.note === undefined
-        ? preset.repMin
-        : (session.sets[0]?.reps ?? preset.repMin);
-    await addSetsToExercise(session.id, 1, reps);
-    refresh();
-  }
-
-  async function removeExercise(session: SessionExercise): Promise<void> {
-    await removeExerciseFromDay(session.id);
-    refresh();
-  }
+  }, [refresh]);
 
   function changeUnit(next: 'kg' | 'lb'): void {
     setUnit(next);
     void setWeightUnit(next);
   }
+
+  /*
+   * Identity-stable handlers for the memoised children.
+   *
+   * A refresh replaces `sessions` and `prs`. If the block and row callbacks were
+   * rebuilt when that happened, `memo` could never bail out and the whole tree
+   * would re-render on every data update. So the callbacks here are created once
+   * and read the live data from `live` at call time; the per-session handler
+   * objects are then cached by session id and never change.
+   *
+   * `live` is assigned during render so a handler always sees the newest values;
+   * it is only ever read inside event handlers, never during render.
+   */
+  const live = useRef({ sessions, dayId });
+  live.current = { sessions, dayId };
+
+  /*
+   * The current intensity's minimum reps, read through a ref for the same reason
+   * as `live`.
+   *
+   * `actions` is memoised and the per-session handler bundles are cached by
+   * session id, so a handler never closes over a later render. `addSet` needs the
+   * preset that applies *now*, not the one in force when the bundle was created:
+   * a row with no note falls back to `repMin`, and switching intensity after the
+   * bundle was cached must still write the new rep count.
+   */
+  const liveRepMin = useRef(preset.repMin);
+  liveRepMin.current = preset.repMin;
+
+  const actions = useMemo(() => {
+    const findSession = (sessionId: string): SessionExercise | undefined =>
+      live.current.sessions.find((session) => session.id === sessionId);
+
+    return {
+      move(sessionId: string, direction: -1 | 1): void {
+        const { sessions: current, dayId: currentDayId } = live.current;
+        const index = current.findIndex((session) => session.id === sessionId);
+        const target = index + direction;
+        if (index === -1 || !currentDayId || target < 0 || target >= current.length) return;
+
+        const order = current.map((session) => session.id);
+        [order[index], order[target]] = [order[target], order[index]];
+        void reorderExercises(currentDayId, order).then(refresh);
+      },
+
+      rename(sessionId: string, name: string): void {
+        void updateSessionName(sessionId, name).then(refresh);
+      },
+
+      remove(sessionId: string): void {
+        void removeExerciseFromDay(sessionId).then(refresh);
+      },
+
+      addSet(sessionId: string): void {
+        const session = findSession(sessionId);
+        if (session === undefined) return;
+        // Read through the ref: this handler outlives the preset it was built
+        // with, so `preset.repMin` here would be the value from that render.
+        const { current: repMin } = liveRepMin;
+        const reps = session.note === undefined ? repMin : (session.sets[0]?.reps ?? repMin);
+        void addSetsToExercise(session.id, 1, reps).then(refresh);
+      },
+
+      changeSet(setId: string, patch: { weightKg?: number | null; reps?: number | null }): Promise<void> {
+        return patchSet(setId, patch);
+      },
+
+      toggleSet(setId: string, patch?: TogglePatch): Promise<void> {
+        for (const session of live.current.sessions) {
+          const set = session.sets.find((row) => row.id === setId);
+          if (set !== undefined) return toggle(setId, set.completed, patch);
+        }
+        return Promise.resolve();
+      },
+
+      deleteSet(setId: string): void {
+        void deleteSet(setId).then(refresh);
+      },
+    };
+  }, [refresh, patchSet, toggle]);
+
+  /**
+   * The handler bundle for one session, created once per session id.
+   *
+   * Cached rather than rebuilt so an unchanged block receives identical props on
+   * every refresh, which is what the memo comparison needs to skip it.
+   */
+  const handlerCache = useRef(
+    new Map<
+      string,
+      {
+        move: (direction: -1 | 1) => void;
+        rename: (name: string) => void;
+        remove: () => void;
+        addSet: () => void;
+        changeSet: (setId: string, patch: { weightKg?: number | null; reps?: number | null }) => Promise<void>;
+        toggleSet: (setId: string, patch?: TogglePatch) => Promise<void>;
+        deleteSet: (setId: string) => void;
+      }
+    >(),
+  );
+
+  const handlersFor = useCallback(
+    (sessionId: string) => {
+      const cached = handlerCache.current.get(sessionId);
+      if (cached !== undefined) return cached;
+
+      const created = {
+        move: (direction: -1 | 1) => actions.move(sessionId, direction),
+        rename: (name: string) => actions.rename(sessionId, name),
+        remove: () => actions.remove(sessionId),
+        addSet: () => actions.addSet(sessionId),
+        changeSet: actions.changeSet,
+        toggleSet: actions.toggleSet,
+        deleteSet: actions.deleteSet,
+      };
+      handlerCache.current.set(sessionId, created);
+      return created;
+    },
+    [actions],
+  );
 
   const totalSets = sessions.reduce((sum, session) => sum + session.sets.length, 0);
   const completedSets = sessions.reduce(
@@ -281,29 +449,32 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
 
       <IntensityPicker value={intensity} onChange={setIntensity} />
 
-      {sessions.map((session, index) => (
-        <ExerciseBlock
-          key={session.id}
-          session={session}
-          index={index}
-          total={sessions.length}
-          unit={unit}
-          intensity={intensity}
-          pr={prs.get(session.exerciseId) ?? null}
-          onMove={(direction) => void move(index, direction)}
-          onRename={(name) => void updateSessionName(session.id, name).then(refresh)}
-          onDeleteExercise={() => void removeExercise(session)}
-          onAddSet={() => void addSet(session)}
-          onChangeSet={(setId, patch) => patchSet(setId, patch)}
-          onToggleSet={(setId, patch) => {
-            const set = session.sets.find((row) => row.id === setId);
-            return set === undefined ? Promise.resolve() : toggle(setId, set.completed, patch);
-          }}
-          onDeleteSet={(setId) => {
-            void deleteSet(setId).then(refresh);
-          }}
-        />
-      ))}
+      {sessions.map((session, index) => {
+        const handlers = handlersFor(session.id);
+        const pr = prs.get(session.exerciseId) ?? null;
+
+        return (
+          <ExerciseBlock
+            key={session.id}
+            session={session}
+            index={index}
+            total={sessions.length}
+            unit={unit}
+            intensity={intensity}
+            pr={pr}
+            /* Hoisted from the block, so this prop is a primitive and the block
+               never compares ids while rendering. */
+            isVolumeRecordHere={pr?.achievements?.volume?.workoutExerciseId === session.id}
+            onMove={handlers.move}
+            onRename={handlers.rename}
+            onDeleteExercise={handlers.remove}
+            onAddSet={handlers.addSet}
+            onChangeSet={handlers.changeSet}
+            onToggleSet={handlers.toggleSet}
+            onDeleteSet={handlers.deleteSet}
+          />
+        );
+      })}
 
       {sessions.length === 0 ? (
         <p className="rounded-2xl bg-slate-900/50 p-4 text-xs text-slate-500 ring-1 ring-inset ring-slate-800">
