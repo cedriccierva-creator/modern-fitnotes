@@ -103,6 +103,7 @@ const genuineLoadDay = dataLayer.loadDay;
 trackDatabaseReads(dataLayer, ['loadDay']);
 trackDatabaseReads(await import('../db/exercises'), ['loadExercises']);
 trackDatabaseReads(await import('../db/personalRecords'), [
+  'getPRsForExercises',
   'getPRsForExercise',
   'loadExercisePerformance',
 ]);

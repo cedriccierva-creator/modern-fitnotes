@@ -26,7 +26,11 @@ afterEach(async () => {
 
 trackDatabaseReads(await import('../db/workout'), ['loadDay']);
 trackDatabaseReads(await import('../db/exercises'), ['loadExercises']);
-trackDatabaseReads(await import('../db/personalRecords'), ['getPRsForExercise', 'loadExercisePerformance']);
+trackDatabaseReads(await import('../db/personalRecords'), [
+  'getPRsForExercises',
+  'getPRsForExercise',
+  'loadExercisePerformance',
+]);
 trackDatabaseReads(await import('../db/settings'), ['loadWeightUnit']);
 
 function renderPicker(overrides: Partial<Parameters<typeof AddExercise>[0]> = {}) {

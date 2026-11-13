@@ -21,7 +21,7 @@ import {
   findNameCollisions,
 } from '../db/exerciseCatalog';
 import { CATALOG, type CatalogExercise } from '../lib/exerciseCatalog';
-import { getPRsForExercise } from '../db/personalRecords';
+import { getPRsForExercises } from '../db/personalRecords';
 import { loadWeightUnit, setWeightUnit } from '../db/settings';
 import { findIntensity } from '../lib/intensity';
 import type { IntensityId } from '../lib/intensity';
@@ -33,7 +33,7 @@ import type { Exercise, WorkoutSet } from '../types';
 /**
  * Reuse the previous PR value for every exercise whose records did not change.
  *
- * `getPRsForExercise` rebuilds its result on every read, so without this each
+ * `getPRsForExercises` rebuilds its result on every read, so without this each
  * refresh produced an entirely new map of new objects and every memoised block
  * re-rendered even though no record had changed. Unchanged exercises keep their
  * previous identity, so their blocks compare equal and skip rendering. When
@@ -149,26 +149,33 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       setDayId(details.day?.id ?? null);
       setSessions(details.exercises);
 
-      // One PR read per distinct exercise, not per session row.
+      // One PR read for the whole day, keyed by distinct exercise rather than by
+      // session row: the batch answers every exercise from three shared queries
+      // and isolates failures per exercise internally.
       const exerciseIds = [...new Set(details.exercises.map((session) => session.exerciseId))];
 
-      void Promise.allSettled(exerciseIds.map((id) => getPRsForExercise(id))).then((results) => {
-        if (ticket !== generation.current) return;
-
-        const next = new Map<string, ExercisePR>();
-        results.forEach((result, index) => {
-          // A failed lookup is left out of the map, so the UI shows no PR rather
-          // than a stale one. Logging keeps working either way.
-          if (result.status === 'fulfilled') next.set(exerciseIds[index], result.value);
-        });
-        /*
-         * This is a second, later commit than the day read above. Keeping the
-         * previous map when nothing actually changed means it is a no-op render,
-         * and the memoised blocks below then skip in one comparison instead of
-         * re-rendering the whole tree for identical data.
-         */
-        setPrs((previous) => mergePrs(previous, next));
-      });
+      /*
+       * A failed exercise is absent from the map, so the UI shows no PR rather
+       * than a stale one, and logging keeps working either way. The read is not
+       * expected to reject -- it falls back to per-exercise reads first -- but a
+       * rejection is handled rather than left floating: every record is dropped,
+       * which is the same "show nothing" answer a failed lookup gives today.
+       *
+       * The second argument is a later commit than the day read above. Keeping
+       * the previous map when nothing actually changed means it is a no-op
+       * render, and the memoised blocks below then skip in one comparison
+       * instead of re-rendering the whole tree for identical data.
+       */
+      void getPRsForExercises(exerciseIds).then(
+        (next) => {
+          if (ticket !== generation.current) return;
+          setPrs((previous) => mergePrs(previous, next));
+        },
+        () => {
+          if (ticket !== generation.current) return;
+          setPrs((previous) => mergePrs(previous, new Map()));
+        },
+      );
     });
 
     void loadExercises().then((rows) => {

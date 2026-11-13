@@ -11,7 +11,7 @@ import { createExercise } from '../db/exercises';
 import { addExerciseToDay } from '../db/workout';
 import { computeExercisePr } from '../lib/pr';
 import type { ExercisePR, SetPerformance } from '../lib/pr';
-import { getPRsForExercise } from '../db/personalRecords';
+import { getPRsForExercises } from '../db/personalRecords';
 import type { SessionExercise } from '../db/workout';
 import type { WorkoutSet } from '../types';
 
@@ -19,7 +19,7 @@ import type { WorkoutSet } from '../types';
  * Phase 5b UI: current-PR line and trophy marker.
  *
  * Every PR shown here comes from the Phase 5a engine (`computeExercisePr`) or the
- * real `getPRsForExercise` read. No PR arithmetic is written in this file -- it
+ * real PR read (`getPRsForExercises`). No PR arithmetic is written in this file -- it
  * asserts presentation and freshness only.
  *
  * Note on interaction: a set only qualifies for a PR once it is *completed*
@@ -29,16 +29,16 @@ import type { WorkoutSet } from '../types';
 
 vi.mock('../db/personalRecords', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../db/personalRecords')>();
-  return { ...actual, getPRsForExercise: vi.fn(actual.getPRsForExercise) };
+  return { ...actual, getPRsForExercises: vi.fn(actual.getPRsForExercises) };
 });
 
 const actualRecords = await vi.importActual<typeof import('../db/personalRecords')>(
   '../db/personalRecords',
 );
-const realGetPRsForExercise = actualRecords.getPRsForExercise;
+const realGetPRsForExercises = actualRecords.getPRsForExercises;
 
 beforeEach(async () => {
-  vi.mocked(getPRsForExercise).mockClear();
+  vi.mocked(getPRsForExercises).mockClear();
   await db.open();
   await db.delete();
   await db.open();
@@ -46,8 +46,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   cleanup();
-  vi.mocked(getPRsForExercise).mockReset();
-  vi.mocked(getPRsForExercise).mockImplementation(realGetPRsForExercise);
+  vi.mocked(getPRsForExercises).mockReset();
+  vi.mocked(getPRsForExercises).mockImplementation(realGetPRsForExercises);
   await db.delete();
 });
 
@@ -321,18 +321,18 @@ describe('workout screen PR flow', () => {
     await logSet(1, '100');
     await waitFor(() => expect(screen.getByText('PR 100 kg')).toBeTruthy());
 
-    const callsBefore = vi.mocked(getPRsForExercise).mock.calls.length;
+    const callsBefore = vi.mocked(getPRsForExercises).mock.calls.length;
     await userEvent.setup().click(screen.getByRole('button', { name: 'lb' }));
 
     await waitFor(() => expect(screen.getByText('PR 220.462 lb')).toBeTruthy());
     expect(screen.queryByText('PR 100 kg')).toBeNull();
-    expect(vi.mocked(getPRsForExercise).mock.calls.length).toBe(callsBefore);
+    expect(vi.mocked(getPRsForExercises).mock.calls.length).toBe(callsBefore);
   });
 });
 
 describe('freshness guarantees', () => {
   it('cannot display stale PR data when refreshes complete out of order', async () => {
-    await seedExercise();
+    const { exercise } = await seedExercise();
 
     // The first PR read is slow and resolves with an old best; later reads are
     // immediate. Without the generation guard the slow answer would win.
@@ -342,9 +342,9 @@ describe('freshness guarantees', () => {
       release = resolve;
     });
 
-    vi.mocked(getPRsForExercise).mockImplementationOnce(async () => {
+    vi.mocked(getPRsForExercises).mockImplementationOnce(async () => {
       await gate;
-      return stale;
+      return new Map([[exercise.id, stale]]);
     });
 
     await renderWorkout();
@@ -370,7 +370,7 @@ describe('freshness guarantees', () => {
     await waitFor(() => expect(screen.getByText('PR 100 kg')).toBeTruthy());
 
     // Next lookup fails: the indicator must disappear, not linger as "current".
-    vi.mocked(getPRsForExercise).mockRejectedValueOnce(new Error('read failed'));
+    vi.mocked(getPRsForExercises).mockRejectedValueOnce(new Error('read failed'));
     await userEvent.setup().click(screen.getByLabelText('Delete set 2'));
 
     await waitFor(() => expect(screen.queryByText('PR 100 kg')).toBeNull());
