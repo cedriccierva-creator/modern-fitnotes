@@ -8,8 +8,7 @@
  */
 import { db } from './db';
 import {
-  computeExercisePr,
-  computeRecordAchievements,
+  computeExercisePrView,
   type ExercisePR,
   type SetPerformance,
 } from '../lib/pr';
@@ -88,13 +87,15 @@ export async function loadExercisePerformance(exerciseId: string): Promise<SetPe
  * engine just read, so this adds one linear pass and **no extra query**. Only
  * `workoutSets` and its parents are read; `plannedDays` is never touched, so a
  * planned day can never influence a record.
+ *
+ * The weight engine and the achievement pass share one ordering of that
+ * history (`computeExercisePrView`), so the rows are sorted once per read
+ * instead of once per metric.
  */
 export async function getPRsForExercise(exerciseId: string): Promise<ExercisePR> {
   const history = await loadExercisePerformance(exerciseId);
   if (history.length === 0) return EMPTY_PR(exerciseId);
 
-  return {
-    ...computeExercisePr(exerciseId, history),
-    achievements: computeRecordAchievements(history),
-  };
+  const { pr, achievements } = computeExercisePrView(exerciseId, history);
+  return { ...pr, achievements };
 }

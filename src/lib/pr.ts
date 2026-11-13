@@ -105,6 +105,24 @@ export function comparePrOrder(a: SetPerformance, b: SetPerformance): number {
   return a.setId < b.setId ? -1 : a.setId > b.setId ? 1 : 0;
 }
 
+/**
+ * The engine's one ordering, applied once per read.
+ *
+ * Every public entry point below still accepts unordered history and sorts it,
+ * so a standalone call stays correct. The bundled read (`computeExercisePrView`)
+ * sorts a single time and hands that array to the same cores; each core
+ * therefore takes history that is *already* ordered rather than sorting a
+ * private copy again.
+ *
+ * Reusing one ordered array is sound because `comparePrOrder` is total -- it
+ * ends on `setId`, which is unique -- so every permutation of the same rows
+ * produces the identical array. Filtering preserves relative order, so
+ * `ordered.filter(pred)` is exactly what sorting `history.filter(pred)` yields.
+ */
+function sortPrHistory(history: readonly SetPerformance[]): SetPerformance[] {
+  return [...history].sort(comparePrOrder);
+}
+
 /** Strict improvement; equal performances (within float noise) are not PRs. */
 export function isImprovement(value: number, best: number): boolean {
   if (!Number.isFinite(value) || !Number.isFinite(best)) return false;
@@ -146,10 +164,17 @@ export function computeExercisePr(
   exerciseId: string,
   history: readonly SetPerformance[],
 ): ExercisePR {
-  const qualifying = history.filter(
+  return exercisePrFromOrdered(exerciseId, sortPrHistory(history));
+}
+
+/** `computeExercisePr` over history already in `comparePrOrder`. */
+function exercisePrFromOrdered(
+  exerciseId: string,
+  orderedHistory: readonly SetPerformance[],
+): ExercisePR {
+  const ordered = orderedHistory.filter(
     (set) => set.exerciseId === exerciseId && qualifies(set),
   );
-  const ordered = [...qualifying].sort(comparePrOrder);
 
   const trophies: PrSet[] = [];
   // null rather than -Infinity: `isImprovement` refuses non-finite input, so a
@@ -314,12 +339,16 @@ function isLoadedPerformance(set: SetPerformance): boolean {
 export function bestByRepCount(
   history: readonly SetPerformance[],
 ): ReadonlyMap<number, SetPerformance> {
+  return repRangeBestFromOrdered(sortPrHistory(history));
+}
+
+/** `bestByRepCount` over history already in `comparePrOrder`. */
+function repRangeBestFromOrdered(
+  orderedHistory: readonly SetPerformance[],
+): ReadonlyMap<number, SetPerformance> {
   const best = new Map<number, SetPerformance>();
 
-  const ordered = history
-    .filter(isLoadedPerformance)
-    .slice()
-    .sort(comparePrOrder);
+  const ordered = orderedHistory.filter(isLoadedPerformance);
 
   for (const set of ordered) {
     const reps = eligibleReps(set) as number;
@@ -395,10 +424,14 @@ export interface EstimatedOneRepMax {
 export function bestEstimatedOneRepMax(
   history: readonly SetPerformance[],
 ): EstimatedOneRepMax | null {
-  const ordered = history
-    .filter(isLoadedPerformance)
-    .slice()
-    .sort(comparePrOrder);
+  return estimatedOneRepMaxFromOrdered(sortPrHistory(history));
+}
+
+/** `bestEstimatedOneRepMax` over history already in `comparePrOrder`. */
+function estimatedOneRepMaxFromOrdered(
+  orderedHistory: readonly SetPerformance[],
+): EstimatedOneRepMax | null {
+  const ordered = orderedHistory.filter(isLoadedPerformance);
 
   let best: EstimatedOneRepMax | null = null;
 
@@ -452,10 +485,12 @@ export interface RepsRecord {
  * Ties keep the earliest set, as everywhere else.
  */
 export function bestMaxReps(history: readonly SetPerformance[]): RepsRecord | null {
-  const ordered = history
-    .filter((set) => eligibleReps(set) !== null)
-    .slice()
-    .sort(comparePrOrder);
+  return maxRepsFromOrdered(sortPrHistory(history));
+}
+
+/** `bestMaxReps` over history already in `comparePrOrder`. */
+function maxRepsFromOrdered(orderedHistory: readonly SetPerformance[]): RepsRecord | null {
+  const ordered = orderedHistory.filter((set) => eligibleReps(set) !== null);
 
   let best: RepsRecord | null = null;
 
@@ -504,9 +539,16 @@ export interface VolumeRecord {
 export function sessionVolumes(
   history: readonly SetPerformance[],
 ): ReadonlyMap<string, VolumeRecord> {
+  return sessionVolumesFromOrdered(sortPrHistory(history));
+}
+
+/** `sessionVolumes` over history already in `comparePrOrder`. */
+function sessionVolumesFromOrdered(
+  orderedHistory: readonly SetPerformance[],
+): ReadonlyMap<string, VolumeRecord> {
   const volumes = new Map<string, VolumeRecord>();
 
-  for (const set of [...history].sort(comparePrOrder)) {
+  for (const set of orderedHistory) {
     if (!isLoadedPerformance(set)) continue;
 
     const weight = eligibleWeightKg(set) as number;
@@ -538,11 +580,18 @@ export function sessionVolumes(
  * is deterministic regardless of input order.
  */
 export function bestSessionVolume(history: readonly SetPerformance[]): VolumeRecord | null {
+  return bestSessionVolumeFromOrdered(sortPrHistory(history));
+}
+
+/** `bestSessionVolume` over history already in `comparePrOrder`. */
+function bestSessionVolumeFromOrdered(
+  orderedHistory: readonly SetPerformance[],
+): VolumeRecord | null {
   let best: VolumeRecord | null = null;
 
-  // `sessionVolumes` already yields sessions in canonical order, because it
-  // inserts on each session's earliest set while walking sorted history.
-  for (const volume of sessionVolumes(history).values()) {
+  // Sessions come back in canonical order, because each one is inserted on its
+  // earliest contributing set while walking ordered history.
+  for (const volume of sessionVolumesFromOrdered(orderedHistory).values()) {
     if (best === null || isImprovement(volume.volumeKg, best.volumeKg)) best = volume;
   }
 
@@ -662,10 +711,16 @@ function sortRecords(records: Iterable<SetRecord>): SetRecord[] {
 export function computeRecordAchievements(
   history: readonly SetPerformance[],
 ): RecordAchievements {
+  return achievementsFromOrdered(sortPrHistory(history));
+}
+
+/** `computeRecordAchievements` over history already in `comparePrOrder`. */
+function achievementsFromOrdered(
+  ordered: readonly SetPerformance[],
+): RecordAchievements {
   const bySetId = new Map<string, SetRecord[]>();
   /** Mirror of `bySetId`, holding only the records each set still holds. */
   const holders = new Map<string, SetRecord[]>();
-  const ordered = [...history].sort(comparePrOrder);
 
   let bestWeight: number | null = null;
   let weightHolder: { setId: string; weightKg: number } | null = null;
@@ -738,12 +793,13 @@ export function computeRecordAchievements(
   }
 
   // E. Session volume: belongs to the session, so it is never attached to a set.
-  const volume = bestSessionVolume(history);
+  // These three reuse `ordered` rather than re-sorting the same history.
+  const volume = bestSessionVolumeFromOrdered(ordered);
 
   // Current holders for the metrics with no set-level badge of their own, so the
   // exercise header can show them without a second pass over history.
-  const estimateHolder = bestEstimatedOneRepMax(history);
-  const repsHolder = bestMaxReps(history);
+  const estimateHolder = estimatedOneRepMaxFromOrdered(ordered);
+  const repsHolder = maxRepsFromOrdered(ordered);
 
   const labels = Object.fromEntries(
     RECORD_ORDER.map((record) => [record, recordLabel(record)]),
@@ -772,6 +828,33 @@ export function computeRecordAchievements(
           },
     setCount: bySetId.size,
     labels,
+  };
+}
+
+/**
+ * Everything one exercise's records need, from a single sort of its history.
+ *
+ * `computeExercisePr` and `computeRecordAchievements` each used to sort the same
+ * history for themselves -- and the achievement pass sorted it three more times
+ * to answer the session-volume, estimated-1RM and max-reps questions. That was
+ * five sorts of one array per read. This entry point sorts once and hands the
+ * ordered result to the same cores, so results are identical by construction:
+ * `comparePrOrder` is total, so the ordered array is the only one that history
+ * can produce, and the cores merely filter it (order-preserving) instead of
+ * sorting filtered copies.
+ *
+ * The PR and the achievements are returned together rather than merged, so a
+ * caller keeps `ExercisePR` (`achievements` is an optional field) exactly as the
+ * database layer attaches it today.
+ */
+export function computeExercisePrView(
+  exerciseId: string,
+  history: readonly SetPerformance[],
+): { pr: ExercisePR; achievements: RecordAchievements } {
+  const ordered = sortPrHistory(history);
+  return {
+    pr: exercisePrFromOrdered(exerciseId, ordered),
+    achievements: achievementsFromOrdered(ordered),
   };
 }
 
