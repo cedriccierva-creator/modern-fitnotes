@@ -113,11 +113,19 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
   const [prs, setPrs] = useState<ReadonlyMap<string, ExercisePR>>(() => new Map());
 
   /**
-   * Monotonic ticket for the newest refresh. A slower, older refresh must never
-   * write over a newer one, which is why every async result checks this before
-   * touching state.
+   * Monotonic tickets, one per independently refreshed slice. A slower, older
+   * refresh must never write over a newer one, which is why every async result
+   * checks its own ticket before touching state.
+   *
+   * The two slices are separate on purpose. A set write only changes the day, and
+   * an adoption only changes the library, so their refreshes are independent: with
+   * one shared counter, a library refresh that landed mid-flight would bump the
+   * ticket of a day read that is still loading and discard its result, and the
+   * reverse. Two counters keep each slice's stale-result protection strict
+   * without letting the slices invalidate each other.
    */
-  const generation = useRef(0);
+  const dayGeneration = useRef(0);
+  const libraryGeneration = useRef(0);
 
   /**
    * Catalog entries the library already covers, for the picker's "In library"
@@ -139,11 +147,15 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
     return ids;
   }, [library]);
 
-  const refresh = useCallback(() => {
-    const ticket = ++generation.current;
+  /**
+   * Day data and records: the sessions of `date` and the PRs for the exercises
+   * they use. This is everything a set write can change.
+   */
+  const refreshDay = useCallback(() => {
+    const ticket = ++dayGeneration.current;
 
     void loadDay(date).then((details) => {
-      if (ticket !== generation.current) return;
+      if (ticket !== dayGeneration.current) return;
       // Committed as soon as the day read lands, exactly as before: the exercise
       // list must never wait on the PR reads.
       setDayId(details.day?.id ?? null);
@@ -168,21 +180,39 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
        */
       void getPRsForExercises(exerciseIds).then(
         (next) => {
-          if (ticket !== generation.current) return;
+          if (ticket !== dayGeneration.current) return;
           setPrs((previous) => mergePrs(previous, next));
         },
         () => {
-          if (ticket !== generation.current) return;
+          if (ticket !== dayGeneration.current) return;
           setPrs((previous) => mergePrs(previous, new Map()));
         },
       );
     });
+  }, [date]);
+
+  /**
+   * The exercise library, and nothing else.
+   *
+   * Only a library mutation can change these rows: adopting, creating, renaming
+   * or deleting an exercise. Set writes, session renames and day loads cannot, so
+   * they no longer pay for this read, for the 318-entry adoption recompute above,
+   * or for re-rendering the memoised `AddExercise` picker -- its props stay
+   * identity-stable across a day-only refresh, which is what the `useCallback`s
+   * further down provide.
+   *
+   * The Library list in this screen is deliberately *not* memoised, so it can
+   * still re-render with `WorkoutScreen`; this split claims only the read, the
+   * adoption recompute and the picker.
+   */
+  const refreshLibrary = useCallback(() => {
+    const ticket = ++libraryGeneration.current;
 
     void loadExercises().then((rows) => {
-      if (ticket !== generation.current) return;
+      if (ticket !== libraryGeneration.current) return;
       setLibrary(rows);
     });
-  }, [date]);
+  }, []);
 
   // Switching dates drops the previous day's records immediately, so a slow
   // first load on the new date cannot show the old date's trophies.
@@ -190,67 +220,108 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
     setPrs(new Map());
   }, [date]);
 
-  useEffect(refresh, [refresh]);
+  // Mount and date changes load both slices: the day is `date`-scoped, and the
+  // library is loaded for the screen. A date change re-reads both, as before.
+  useEffect(() => {
+    refreshDay();
+    refreshLibrary();
+  }, [refreshDay, refreshLibrary]);
+
   useEffect(() => {
     void loadWeightUnit().then(setUnit);
   }, []);
 
   const preset = findIntensity(intensity);
 
-  async function attach(exercise: Exercise): Promise<void> {
-    await addExerciseToDay(date, exercise, intensity);
-    refresh();
-  }
+  /**
+   * Attach an exercise to the day. This writes `workoutExercises` and
+   * `workoutSets` only, so the day refresh is the whole refresh -- the library
+   * cannot have changed here. `create` refreshes the library separately when it
+   * is the path that actually added a library row.
+   */
+  const attach = useCallback(
+    async (exercise: Exercise): Promise<void> => {
+      await addExerciseToDay(date, exercise, intensity);
+      refreshDay();
+    },
+    [date, intensity, refreshDay],
+  );
 
   /**
    * Create a custom exercise, refusing to silently duplicate one that already
    * exists. A name clash with the library or with a built-in catalog entry asks
    * first; declining returns to the form with the name kept in place.
+   *
+   * `date` and `intensity` reach `addExerciseToDay` through `attach`, whose
+   * identity already carries them, so this callback cannot attach to a stale day.
    */
-  async function create(name: string, muscleGroup: string): Promise<void> {
-    const collisions = await findNameCollisions(name);
+  const create = useCallback(
+    async (name: string, muscleGroup: string): Promise<void> => {
+      const collisions = await findNameCollisions(name);
 
-    if (collisions.library !== undefined) {
-      const reuse = window.confirm(
-        `"${collisions.library.name}" is already in your library. Add it to today instead of creating a duplicate?`,
-      );
-      if (!reuse) return;
-      await attach(collisions.library);
-      return;
-    }
+      if (collisions.library !== undefined) {
+        const reuse = window.confirm(
+          `"${collisions.library.name}" is already in your library. Add it to today instead of creating a duplicate?`,
+        );
+        if (!reuse) return;
+        await attach(collisions.library);
+        return;
+      }
 
-    const catalogMatch = collisions.catalog[0];
-    if (catalogMatch !== undefined) {
-      const adopt = window.confirm(
-        `"${catalogMatch.name}" is already in the built-in catalog. Add that one to today instead of creating a custom copy?`,
-      );
-      if (!adopt) return;
-      await attach(catalogEntryToExercise(catalogMatch));
-      return;
-    }
+      const catalogMatch = collisions.catalog[0];
+      if (catalogMatch !== undefined) {
+        const adopt = window.confirm(
+          `"${catalogMatch.name}" is already in the built-in catalog. Add that one to today instead of creating a custom copy?`,
+        );
+        if (!adopt) return;
+        await attach(catalogEntryToExercise(catalogMatch));
+        return;
+      }
 
-    await attach(await createExercise(name, muscleGroup));
-  }
+      await attach(await createExercise(name, muscleGroup));
+      // This path did add a library row, so the Library list and the picker's
+      // "In library" badges have to hear about it. The other two paths above
+      // attach an existing or transient exercise and change no library row.
+      refreshLibrary();
+    },
+    [attach, refreshLibrary],
+  );
 
   /** Library-only: adopt a catalog suggestion without touching today's workout. */
-  async function adoptFromCatalog(entry: CatalogExercise): Promise<void> {
-    const outcome = await adoptCatalogExercise(entry.id, {
-      confirmNameCollision: (existing) =>
-        window.confirm(
-          `"${existing.name}" already exists in your library. Save this catalog exercise as a separate entry anyway?`,
-        ),
-    });
+  const adoptFromCatalog = useCallback(
+    async (entry: CatalogExercise): Promise<void> => {
+      const outcome = await adoptCatalogExercise(entry.id, {
+        confirmNameCollision: (existing) =>
+          window.confirm(
+            `"${existing.name}" already exists in your library. Save this catalog exercise as a separate entry anyway?`,
+          ),
+      });
 
-    if (outcome.status === 'name-taken') {
-      console.warn('Adoption cancelled: name already taken', entry.name);
-    }
-    refresh();
-  }
+      if (outcome.status === 'name-taken') {
+        console.warn('Adoption cancelled: name already taken', entry.name);
+      }
+      // Adoption writes `exercises` only, so the day is untouched.
+      refreshLibrary();
+    },
+    [refreshLibrary],
+  );
 
   /** Today-only: log a catalog suggestion without adopting it into the library. */
-  async function addCatalogToToday(entry: CatalogExercise): Promise<void> {
-    await attach(catalogEntryToExercise(entry));
-  }
+  const addCatalogToToday = useCallback(
+    async (entry: CatalogExercise): Promise<void> => {
+      // Deliberately no library refresh: logging a suggestion is not adopting it.
+      await attach(catalogEntryToExercise(entry));
+    },
+    [attach],
+  );
+
+  /** The picker's "add an existing library row to today" action. */
+  const addLibraryExercise = useCallback(
+    (exercise: Exercise): void => {
+      void attach(exercise);
+    },
+    [attach],
+  );
 
   /**
    * Flip completion, recording any unsaved weight draft in the same write.
@@ -269,8 +340,8 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       console.error('Could not update set', setId, error);
       return;
     }
-    refresh();
-  }, [refresh]);
+    refreshDay();
+  }, [refreshDay]);
 
   /**
    * Persist a non-toggle patch (blur commits, reps). Resolves only after the
@@ -284,8 +355,8 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       console.error('Could not save set weight', setId, error);
       throw error;
     }
-    refresh();
-  }, [refresh]);
+    refreshDay();
+  }, [refreshDay]);
 
   function changeUnit(next: 'kg' | 'lb'): void {
     setUnit(next);
@@ -333,15 +404,15 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
 
         const order = current.map((session) => session.id);
         [order[index], order[target]] = [order[target], order[index]];
-        void reorderExercises(currentDayId, order).then(refresh);
+        void reorderExercises(currentDayId, order).then(refreshDay);
       },
 
       rename(sessionId: string, name: string): void {
-        void updateSessionName(sessionId, name).then(refresh);
+        void updateSessionName(sessionId, name).then(refreshDay);
       },
 
       remove(sessionId: string): void {
-        void removeExerciseFromDay(sessionId).then(refresh);
+        void removeExerciseFromDay(sessionId).then(refreshDay);
       },
 
       addSet(sessionId: string): void {
@@ -351,7 +422,7 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
         // with, so `preset.repMin` here would be the value from that render.
         const { current: repMin } = liveRepMin;
         const reps = session.note === undefined ? repMin : (session.sets[0]?.reps ?? repMin);
-        void addSetsToExercise(session.id, 1, reps).then(refresh);
+        void addSetsToExercise(session.id, 1, reps).then(refreshDay);
       },
 
       changeSet(setId: string, patch: { weightKg?: number | null; reps?: number | null }): Promise<void> {
@@ -367,10 +438,10 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       },
 
       deleteSet(setId: string): void {
-        void deleteSet(setId).then(refresh);
+        void deleteSet(setId).then(refreshDay);
       },
     };
-  }, [refresh, patchSet, toggle]);
+  }, [refreshDay, patchSet, toggle]);
 
   /**
    * The handler bundle for one session, created once per session id.
@@ -492,9 +563,9 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       <AddExercise
         library={library}
         adoptedCatalogIds={adoptedCatalogIds}
-        onAddLibraryExercise={(exercise) => void attach(exercise)}
-        onAddToToday={(entry) => void addCatalogToToday(entry)}
-        onAdopt={(entry) => void adoptFromCatalog(entry)}
+        onAddLibraryExercise={addLibraryExercise}
+        onAddToToday={addCatalogToToday}
+        onAdopt={adoptFromCatalog}
         onCreate={create}
       />
 
@@ -507,7 +578,7 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
               <button
                 type="button"
                 aria-label={`Rename ${exercise.name}`}
-                onClick={() => void renameExercise(exercise.id, prompt('New name', exercise.name) ?? exercise.name).then(refresh)}
+                onClick={() => void renameExercise(exercise.id, prompt('New name', exercise.name) ?? exercise.name).then(refreshLibrary)}
                 className="min-h-[44px] px-2 text-slate-500 hover:text-emerald-300"
               >
                 rename
@@ -515,7 +586,7 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
               <button
                 type="button"
                 aria-label={`Delete ${exercise.name}`}
-                onClick={() => void deleteExercise(exercise.id).then(refresh)}
+                onClick={() => void deleteExercise(exercise.id).then(refreshLibrary)}
                 className="min-h-[44px] px-2 text-slate-500 hover:text-rose-300"
               >
                 delete

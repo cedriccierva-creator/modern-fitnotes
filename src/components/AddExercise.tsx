@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import {
   CATALOG_CATEGORIES,
   LEVEL_LABELS,
@@ -43,7 +43,7 @@ interface Props {
  * Browsing here reads `lib/exerciseCatalog` and nothing else, so opening the
  * picker performs no database writes at all.
  */
-export default function AddExercise({
+function AddExerciseComponent({
   library,
   adoptedCatalogIds,
   onAddLibraryExercise,
@@ -306,3 +306,20 @@ export default function AddExercise({
     </section>
   );
 }
+
+/**
+ * Memoised so a refresh that leaves the picker alone does not rebuild it.
+ *
+ * The picker renders a searchable slice of the 318-entry catalog -- the default
+ * "Gym" tab alone is 168 rows, each with its own controls -- and none of that
+ * depends on the day's sets or records. The parent now keeps every prop
+ * identity-stable across a day-only refresh: `library` and `adoptedCatalogIds`
+ * are derived from library state that no longer changes on a set write, and the
+ * callbacks are `useCallback`s whose dependencies carry `date` and `intensity`.
+ * With plain shallow comparison that is enough to skip this subtree entirely,
+ * so no custom comparator is needed (and none could silently go stale).
+ */
+export const AddExercise = memo(AddExerciseComponent);
+AddExercise.displayName = 'AddExercise';
+
+export default AddExercise;
