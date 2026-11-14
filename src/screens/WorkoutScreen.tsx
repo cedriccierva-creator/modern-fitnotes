@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import AddExercise from '../components/AddExercise';
 import ExerciseBlock from '../components/ExerciseBlock';
 import IntensityPicker from '../components/IntensityPicker';
@@ -31,7 +31,7 @@ import type { ExercisePR } from '../lib/pr';
 import type { Exercise, WorkoutSet } from '../types';
 
 /**
- * Reuse the previous PR value for every exercise whose records did not change.
+ * Merge a *whole-day* records read into the map.
  *
  * `getPRsForExercises` rebuilds its result on every read, so without this each
  * refresh produced an entirely new map of new objects and every memoised block
@@ -39,21 +39,68 @@ import type { Exercise, WorkoutSet } from '../types';
  * previous identity, so their blocks compare equal and skip rendering. When
  * nothing at all changed the previous map itself is returned, which makes the
  * whole update a no-op.
+ *
+ * A whole-day read answers for every exercise in the day, so its map is the
+ * day's key set: an exercise it no longer holds is dropped. The one exception is
+ * an exercise a *newer* read spoke about -- a targeted read that was issued after
+ * this one. That entry is left exactly as it is, because this read's answer for
+ * it is the older one and must not overwrite it.
  */
-function mergePrs(
+function mergeFullPrs(
   previous: ReadonlyMap<string, ExercisePR>,
   next: ReadonlyMap<string, ExercisePR>,
+  isSuperseded: (exerciseId: string) => boolean,
 ): ReadonlyMap<string, ExercisePR> {
-  let changed = previous.size !== next.size;
+  let changed = false;
   const merged = new Map<string, ExercisePR>();
 
   for (const [exerciseId, pr] of next) {
     const prior = previous.get(exerciseId);
+    if (isSuperseded(exerciseId)) {
+      if (prior !== undefined) merged.set(exerciseId, prior);
+      continue;
+    }
     if (prior !== undefined && samePr(prior, pr)) {
       merged.set(exerciseId, prior);
       continue;
     }
     merged.set(exerciseId, pr);
+    changed = true;
+  }
+
+  for (const [exerciseId, pr] of previous) {
+    if (merged.has(exerciseId)) continue;
+    if (isSuperseded(exerciseId)) {
+      merged.set(exerciseId, pr);
+      continue;
+    }
+    // Absent from a whole-day read means the exercise left the day, or its lookup
+    // failed: either way the map stays the day's key set, as before.
+    changed = true;
+  }
+
+  return changed ? merged : previous;
+}
+
+/**
+ * The map without the entries a failed whole-day read covers.
+ *
+ * A failed whole-day read answers "show nothing" for the day, exactly as before.
+ * The exception is again an exercise a newer read spoke about: that read owns the
+ * entry, so this failure must not take it away.
+ */
+function dropFullPrs(
+  previous: ReadonlyMap<string, ExercisePR>,
+  isSuperseded: (exerciseId: string) => boolean,
+): ReadonlyMap<string, ExercisePR> {
+  let changed = false;
+  const merged = new Map<string, ExercisePR>();
+
+  for (const [exerciseId, pr] of previous) {
+    if (isSuperseded(exerciseId)) {
+      merged.set(exerciseId, pr);
+      continue;
+    }
     changed = true;
   }
 
@@ -71,7 +118,7 @@ function mergePrs(
  *
  * When the affected exercise's record did not actually move, its previous object
  * is kept too, so an edit that changes no record is a no-op render. As with
- * `mergePrs`, the previous map itself is returned when nothing changed at all.
+ * `mergeFullPrs`, the previous map itself is returned when nothing changed at all.
  */
 function mergeTargetedPrs(
   previous: ReadonlyMap<string, ExercisePR>,
@@ -143,6 +190,29 @@ function samePr(a: ExercisePR, b: ExercisePR): boolean {
 }
 
 /**
+ * The PR map of a visit that has not read any records yet. Shared and never
+ * mutated: `merge*`/`drop*`/`withoutPr` all return a new map, so this one stays
+ * empty and every visit that has read nothing shares it.
+ */
+const NO_PRS: ReadonlyMap<string, ExercisePR> = new Map();
+
+/**
+ * The records state: a PR map *stamped* with the date and visit it was read for.
+ *
+ * The stamp is what makes staleness a property of the value rather than a property
+ * of when some effect happened to run. A render shows the map only when the stamp
+ * matches the date and visit that render is displaying, so a transition can never
+ * show records read for another date -- not in the commit that switches dates, not
+ * before a passive effect has fired, not ever -- and returning to a date later
+ * cannot resurrect the map of an earlier visit of it.
+ */
+interface PrLayer {
+  date: string;
+  visit: number;
+  prs: ReadonlyMap<string, ExercisePR>;
+}
+
+/**
  * Logging screen for one local date.
  *
  * Everything is written straight through Dexie; the exercise *library* and the
@@ -157,9 +227,11 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
   const [intensity, setIntensity] = useState<IntensityId>('universal');
   /**
    * Personal records keyed by exercise id, never by session id: one exercise can
-   * appear twice in a day, and both blocks then show the same current PR.
+   * appear twice in a day, and both blocks then show the same current PR -- and
+   * stamped with the visit that read them, so a map can be recognised as stale
+   * without consulting anything but itself (see `PrLayer`).
    */
-  const [prs, setPrs] = useState<ReadonlyMap<string, ExercisePR>>(() => new Map());
+  const [prLayer, setPrLayer] = useState<PrLayer>(() => ({ date, visit: 0, prs: NO_PRS }));
 
   /**
    * Monotonic tickets, one per independently refreshed slice. A slower, older
@@ -175,6 +247,67 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
    */
   const dayGeneration = useRef(0);
   const libraryGeneration = useRef(0);
+
+  /**
+   * Per-exercise tickets for the records slice: the sequence number of the newest
+   * read that asked about that exercise, in `prGeneration`, and the counter behind
+   * them.
+   *
+   * One day-wide ticket cannot police the records map any more. A set write only
+   * re-reads the exercise it moved, so a refresh no longer speaks for the whole
+   * day: discarding a superseded refresh wholesale would throw away a valid answer
+   * that nothing else re-read, and a just-set record would never show its trophy
+   * because an unrelated exercise's write happened to start in the meantime.
+   *
+   * So each records read registers itself for exactly the exercises it asks
+   * about, and may only write those whose newest ticket is still its own. A
+   * whole-day read registers for every exercise in the day, which is what lets it
+   * invalidate older targeted results; a targeted read registers for one, which is
+   * why it cannot invalidate a different exercise's answer. The newest read for an
+   * exercise still wins, so a slow older answer can never overwrite a newer one.
+   *
+   * Tickets are taken when the records read is issued rather than when the refresh
+   * starts, because the day read decides which exercises that read covers.
+   */
+  const prGeneration = useRef(new Map<string, number>());
+  const prSequence = useRef(0);
+
+  /**
+   * The monotonically increasing visit token: one per date transition, including a
+   * return to a date that was shown before.
+   *
+   * The per-exercise tickets above order reads *within* a visit. They cannot order
+   * them across one, because the new visit never registers the exercises the old
+   * one had: a targeted read for an exercise the new day does not hold would never
+   * be superseded, and would insert its record into a day that does not contain
+   * that exercise.
+   *
+   * A date string cannot stand in for this either. Visiting A, then B, then A again
+   * puts the same string back in state, so a read issued during the *first* visit
+   * of A would look current again during the third -- and while that visit's own
+   * records read is still in flight, nothing has registered the exercise yet, so no
+   * ticket would reject it. Every date transition therefore starts a new visit.
+   *
+   * The token is bumped in the layout effect below, never during render: a render
+   * React discards must not invalidate a visit that is still on screen. Because a
+   * layout effect runs inside the commit that first shows the new date -- before
+   * paint and before the load effect can issue this visit's reads -- the bump is
+   * atomic with that commit, so there is no window in which an old answer is
+   * applied under a token that is already out of date.
+   */
+  const prVisit = useRef(0);
+
+  /**
+   * The records this render may display.
+   *
+   * Derived, not stored: the layer is accepted only while it is stamped with the
+   * date on screen *and* the visit that is current now. This is a comparison, not a
+   * mutation, so it is safe in any render -- and it is what guarantees that the
+   * commit which switches dates already shows no records from the previous one,
+   * independent of when (or whether) any effect has run. An effect can only ever
+   * make the state agree with what this line already shows.
+   */
+  const prs = prLayer.date === date && prLayer.visit === prVisit.current ? prLayer.prs : NO_PRS;
 
   /**
    * Catalog entries the library already covers, for the picker's "In library"
@@ -242,34 +375,87 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
       const requested = targetedId === undefined ? exerciseIds : [targetedId];
 
       /*
+       * Register this read for the exercises it asks about. Only the newest read
+       * for an exercise may write its entry, which is the per-exercise equivalent
+       * of the day ticket above: a newer read for the *same* exercise still wins,
+       * while a newer read for a *different* exercise leaves this one alone.
+       *
+       * A whole-day read registers for every exercise in the day, so it
+       * invalidates older targeted results for all of them; a targeted read
+       * registers for one, so it can never invalidate another exercise's answer.
+       */
+      const prTicket = ++prSequence.current;
+      for (const exerciseId of requested) prGeneration.current.set(exerciseId, prTicket);
+      const isSuperseded = (exerciseId: string): boolean =>
+        (prGeneration.current.get(exerciseId) ?? 0) > prTicket;
+
+      /*
+       * The visit this read is issued under. It is captured here, at the point the
+       * read starts, so it names the visit whose map the answer may write to --
+       * not whichever visit happens to be on screen when the answer arrives.
+       */
+      const visit = prVisit.current;
+      const isThisVisit = (): boolean => prVisit.current === visit;
+
+      /*
        * A failed exercise is absent from the map, so the UI shows no PR rather
        * than a stale one, and logging keeps working either way. The read is not
        * expected to reject -- it falls back to per-exercise reads first -- but a
        * rejection is handled rather than left floating.
        *
-       * A full read's map *is* the day's key set, so a rejection there drops
-       * every record, which is the same "show nothing" answer a failed lookup
-       * gives today. A targeted read only speaks for one exercise, so a rejection
-       * drops that one record and leaves the rest of the map alone: one failed
-       * lookup must never cost an unrelated exercise its PR.
+       * A whole-day read's map *is* the day's key set, so a rejection there drops
+       * every record it covers, which is the same "show nothing" answer a failed
+       * lookup gives today. A targeted read only speaks for one exercise, so a
+       * rejection drops that one record and leaves the rest of the map alone: one
+       * failed lookup must never cost an unrelated exercise its PR.
        *
-       * The second argument is a later commit than the day read above. Keeping
-       * the previous map when nothing actually changed means it is a no-op
-       * render, and the memoised blocks below then skip in one comparison
-       * instead of re-rendering the whole tree for identical data.
+       * Every commit is gated twice by the visit. The outer check keeps an answer
+       * that is already stale from queueing an update at all; the check inside the
+       * updater is the authority, because the date can still change between the
+       * two -- the updater is applied later, in a render React schedules, and by
+       * then the map it is handed may belong to a different visit.
+       *
+       * A superseded answer is skipped rather than committed: its entry belongs to
+       * the newer read now, and both helpers above keep the entries a newer read
+       * spoke about. Keeping the previous map when nothing actually changed means
+       * the commit is a no-op render, and the memoised blocks below then skip in
+       * one comparison instead of re-rendering the whole tree for identical data.
        */
       void getPRsForExercises(requested).then(
         (next) => {
-          if (ticket !== dayGeneration.current) return;
-          setPrs((previous) =>
-            targetedId === undefined ? mergePrs(previous, next) : mergeTargetedPrs(previous, next),
-          );
+          if (!isThisVisit()) return;
+          setPrLayer((layer) => {
+            /*
+             * Apply-time authority, checked against the *state*, not only against
+             * the ref: an answer is merged into the layer of the visit that issued
+             * the read, and nowhere else. `layer.visit !== visit` rejects an update
+             * React applies after the visit was replaced (the layer has been
+             * restamped by then); the token check rejects one whose visit the ref
+             * has already left behind. A rejected update returns the layer itself,
+             * so it stays a no-op render.
+             */
+            if (!isThisVisit() || layer.visit !== visit) return layer;
+            const merged =
+              targetedId === undefined
+                ? mergeFullPrs(layer.prs, next, isSuperseded)
+                : isSuperseded(targetedId)
+                  ? layer.prs
+                  : mergeTargetedPrs(layer.prs, next);
+            return merged === layer.prs ? layer : { ...layer, prs: merged };
+          });
         },
         () => {
-          if (ticket !== dayGeneration.current) return;
-          setPrs((previous) =>
-            targetedId === undefined ? mergePrs(previous, new Map()) : withoutPr(previous, targetedId),
-          );
+          if (!isThisVisit()) return;
+          setPrLayer((layer) => {
+            if (!isThisVisit() || layer.visit !== visit) return layer;
+            const next =
+              targetedId === undefined
+                ? dropFullPrs(layer.prs, isSuperseded)
+                : isSuperseded(targetedId)
+                  ? layer.prs
+                  : withoutPr(layer.prs, targetedId);
+            return next === layer.prs ? layer : { ...layer, prs: next };
+          });
         },
       );
     });
@@ -298,10 +484,32 @@ export default function WorkoutScreen({ date, onBack }: { date: string; onBack: 
     });
   }, []);
 
-  // Switching dates drops the previous day's records immediately, so a slow
-  // first load on the new date cannot show the old date's trophies.
-  useEffect(() => {
-    setPrs(new Map());
+  /*
+   * A date change starts a new visit: the token moves, and the layer is restamped
+   * with the new date and token, empty. Every records read still in flight for the
+   * previous visit -- including one issued during an earlier visit of this same
+   * date -- is thereby invalid, before this visit's own read is issued below.
+   *
+   * This is a *layout* effect, so it runs inside the commit that first shows the
+   * new date: before the browser paints and before the load effect can issue this
+   * visit's reads. A passive effect would leave a window in which the token still
+   * names the previous visit while the new date is already on screen.
+   *
+   * The window is closed twice over. The displayed map is derived per render from
+   * the layer's stamp (`prs` above), so the commit showing the new date already
+   * shows no records from the old one, whatever any effect has done. This effect
+   * then brings the *state* in line with that render, so merges from the new
+   * visit land in a layer stamped for it, and the previous visit's map -- possibly
+   * polluted by an answer that arrived during the switch -- is dropped instead of
+   * being retained.
+   */
+  useLayoutEffect(() => {
+    prVisit.current += 1;
+    setPrLayer((layer) =>
+      layer.date === date && layer.visit === prVisit.current
+        ? layer
+        : { date, visit: prVisit.current, prs: NO_PRS },
+    );
   }, [date]);
 
   // Mount and date changes load both slices: the day is `date`-scoped, and the
